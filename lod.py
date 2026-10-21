@@ -347,28 +347,61 @@ def parametrize(pos, faces, texel, max_px, sub_tris=10_000):
     return np.concatenate(vmaps), out, uv, w, h, texel
 
 
-def bake(pos, faces, ids, exact, texel, max_px, G):
-    """Texture for a tile mesh from the source atlas. `ids` = source faces under the tile. Leaves: each tile
-    face IS source face ids[i] (exact barycentric -> UV). Interior: closest point on the descendant faces."""
+def repack(ids, G, pad=2):
+    """Leaf texture = the source atlas's own texels: every UV island's pixel rect is copied at an integer offset,
+    so nothing is resampled. Returns positions, uvs (glTF, v down), faces, image."""
+    from scipy.sparse import coo_matrix, csgraph
+    A = G["atlas"]
+    H, W = A.shape[:2]
+    fp, ft = np.asarray(G["fp"][ids]), np.asarray(G["ft"][ids])
+    tv, tinv = np.unique(ft, return_inverse=True)
+    tinv = tinv.reshape(-1, 3)
+    e = np.concatenate([tinv[:, :2], tinv[:, 1:]])
+    _, comp = csgraph.connected_components(coo_matrix((np.ones(len(e)), e.T), shape=(len(tv),) * 2), directed=False)
+    px = np.asarray(G["uv"][tv], np.float64) * [W, -H] + [0, H]  # atlas pixels, y down
+    n = comp.max() + 1
+    lo, hi = np.full((n, 2), np.inf), np.full((n, 2), -np.inf)
+    np.minimum.at(lo, comp, px)
+    np.maximum.at(hi, comp, px)
+    r0 = np.maximum(np.floor(lo).astype(int) - pad, 0)
+    r1 = np.minimum(np.ceil(hi).astype(int) + pad, [W, H])
+    size = r1 - r0
+    width = max(int(size[:, 0].max()), int(np.sqrt((size[:, 0] * size[:, 1]).sum()) * 1.05))
+    width += -width % 4
+    dst, x, y, shelf = np.zeros((n, 2), int), 0, 0, 0
+    for i in np.argsort(-size[:, 1], kind="stable"):  # shelf packing, tallest first
+        if x + size[i, 0] > width:
+            x, y, shelf = 0, y + shelf, 0
+        dst[i], x, shelf = (x, y), x + size[i, 0], max(shelf, size[i, 1])
+    height = y + shelf
+    height += -height % 4
+    img = np.zeros((height, width, 3), np.uint8)
+    for i in range(n):
+        (sx, sy), (dx, dy), (w, h) = r0[i], dst[i], size[i]
+        img[dy:dy + h, dx:dx + w] = A[sy:sy + h, sx:sx + w]
+    key = fp.astype(np.int64).ravel() * len(tv) + tinv.ravel()
+    uk, inv = np.unique(key, return_inverse=True)
+    vp, vt = uk // len(tv), uk % len(tv)
+    uv = (px[vt] - r0[comp[vt]] + dst[comp[vt]]) / [width, height]
+    return np.asarray(G["pos"][vp]), uv.astype(np.float32), inv.reshape(-1, 3).astype(np.uint32), img
+
+
+def bake(pos, faces, ids, texel, max_px, G):
+    """Texture for a simplified tile mesh: each texel samples the closest point on the source faces `ids`."""
     vmap, idx, uv, w, h, texel = parametrize(pos, faces, texel, max_px)
     res_pos = pos[vmap]
     tri, bary = raster_uv(uv, idx.astype(np.int64), w, h, 0.75)
     covered = tri >= 0
     valid = covered.reshape(-1)
-    ft = np.asarray(G["ft"][ids])
-    if exact:
-        sf = np.where(valid, tri.reshape(-1), -1).astype(np.int64)
-        suv = interp_uv(sf, bary.reshape(-1, 3), G["uv"], ft)
-    else:
-        P, N = texel_attrs(tri, bary, res_pos.astype(np.float64), idx.astype(np.int64), face_normals(res_pos, idx))
-        fp = np.asarray(G["fp"][ids])
-        tree = cKDTree(centroids(G["pos"], fp))
-        cand = np.full((len(P), 8), -1, np.int64)
-        vi = np.flatnonzero(valid)
-        cand[vi] = tree.query(P[vi], k=8, workers=-1)[1]
-        del tree
-        sf, sb = select_closest(P, N, cand, G["pos"], fp, valid, 0.2)
-        suv = interp_uv(sf, sb, G["uv"], ft)
+    P, N = texel_attrs(tri, bary, res_pos.astype(np.float64), idx.astype(np.int64), face_normals(res_pos, idx))
+    fp, ft = np.asarray(G["fp"][ids]), np.asarray(G["ft"][ids])
+    tree = cKDTree(centroids(G["pos"], fp))
+    cand = np.full((len(P), 8), -1, np.int64)
+    vi = np.flatnonzero(valid)
+    cand[vi] = tree.query(P[vi], k=8, workers=-1)[1]
+    del tree
+    sf, sb = select_closest(P, N, cand, G["pos"], fp, valid, 0.2)
+    suv = interp_uv(sf, sb, G["uv"], ft)
     img = sample_bilinear(G["atlas"], suv, valid).reshape(h, w, 3)
     if not covered.all():  # dilate charts 8 px into the gutter, mean colour beyond
         d, (iy, ix) = ndimage.distance_transform_edt(~covered, return_indices=True)
@@ -505,7 +538,10 @@ def do_tile(tid):
         hi = np.maximum(pos.max(0), np.max([m["bbox"][1] for m in kmeta], 0))
         texel = max(MIN_TEXEL, max(m["texel_m"] for m in kmeta))  # never sharper than the coarsest child
     np.savez(NODES / f"{tid}.npz", positions=pos, faces=faces, gvids=gv.astype(np.uint32))
-    res_pos, uv, idx, img, texel = bake(pos, faces, ids, t["leaf"], texel, 4096 if t["height"] >= 3 else 2048, G)
+    if t["leaf"]:
+        res_pos, uv, idx, img = repack(ids, G)
+    else:
+        res_pos, uv, idx, img, texel = bake(pos, faces, ids, texel, 4096 if t["height"] >= 3 else 2048, G)
     ktx2, scale = ktx2_encode(img)
     write_glb(OUT / "tiles" / f"{tid}.tmp", res_pos, uv * scale, idx, ktx2)
     (OUT / "tiles" / f"{tid}.tmp").replace(OUT / "tiles" / f"{tid}.glb")
@@ -566,8 +602,14 @@ def build(workers):
     print(f"done in {time.time() - t0:.0f}s -> {OUT / 'tileset.json'}")
 
 
+class NoCache(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):  # revalidate every time: a rebuilt tile keeps its url
+        self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+
 def serve(port):
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(ROOT))
+    handler = functools.partial(NoCache, directory=str(ROOT))
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{port}/viewer.html"
     print("serving", url)

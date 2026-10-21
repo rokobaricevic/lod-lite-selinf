@@ -14,8 +14,8 @@ uv run lod.py serve     # http://127.0.0.1:8000/viewer.html
 2. k-d split into 256 leaf tiles of ~200k original triangles.
 3. Simplify bottom-up with meshoptimizer into 64 / 16 / 4 / 1 parent tiles. Borders are locked, so tiles
    at different levels never crack.
-4. Re-bake a texture per tile from the atlas (xatlas + numba). Leaves are exact at 5.4 mm/texel; parents
-   sample the closest point on the original mesh.
+4. Textures: leaves reuse the atlas's own texels. Each UV island's pixel rect is copied at an integer offset,
+   so nothing is resampled. Parents are re-baked (xatlas + numba) from the closest point on the original mesh.
 5. Write 3D Tiles 1.1: KTX2 UASTC textures, lossless meshopt geometry,
    geometricError = max(simplify error, 16 × texel).
 
