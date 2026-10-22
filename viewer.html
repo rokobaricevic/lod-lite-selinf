@@ -154,7 +154,7 @@ function stats() {
 const statsEl = document.getElementById('stats'), ctl = document.getElementById('ctl');
 function addToggle(label, fn) {
   const l = document.createElement('label'), c = document.createElement('input'); c.type = 'checkbox';
-  c.onchange = () => fn(c.checked); l.append(c, ' ' + label); ctl.append(l);
+  c.onchange = () => fn(c.checked); l.append(c, ' ' + label); ctl.append(l); return c;
 }
 function addSlider(label, min, max, val, fn, fmt = (v) => v) {
   const row = document.createElement('div'), t = document.createElement('span'), s = document.createElement('input');
@@ -175,7 +175,7 @@ addToggle('colour by tile depth', (on) => { debug.colorMode = on ? CM.CUSTOM_COL
 addToggle('wireframe', (on) => { S.wireframe = on; for (const t of tiles.lruCache.itemSet.keys()) t.engineData?.scene?.traverse((o) => { if (o.material) o.material.wireframe = on; }); });
 addToggle('bounding boxes', (on) => { debug.displayBoxBounds = on; debug.update(); });
 addToggle('freeze LOD', (on) => (S.frozen = on));
-addToggle('uncapped fps (GPU-paced)', (on) => setUncapped(on));
+const uncapped = addToggle('uncapped fps (GPU-paced)', (on) => setUncapped(on));
 const hint = document.createElement('div'); hint.className = 'hint';
 hint.textContent = 'drag orbit | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit'; ctl.append(hint);
 
@@ -220,6 +220,7 @@ function setUncapped(on) {
   else { while (fences.length) gl.deleteSync(fences.shift()); renderer.setAnimationLoop(frame); }
 }
 renderer.setAnimationLoop(frame);
+if (params.has('uncapped')) { uncapped.checked = true; setUncapped(true); }
 
 const ready = new Promise((resolve, reject) => {
   tiles.addEventListener('load-tileset', function once() {
