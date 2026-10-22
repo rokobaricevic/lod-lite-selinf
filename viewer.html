@@ -61,8 +61,8 @@ setLruMB(LRU_MB);
 tiles.lruCache.maxSize = 100000; tiles.lruCache.minSize = 50000;
 scene.add(tiles.group);
 
-const S = { frozen: false, wireframe: false };
-let diag = 1, center = [0, 0, 0], frames = 0, lastT = performance.now(), msAvg = 16, fpsAvg = 60;
+const S = { frozen: false, wireframe: false, uncapped: false };
+let diag = 1, center = [0, 0, 0], frames = 0, worst = 0, winT = performance.now(), lastT = winT, fps = 0, frameMs = 0, worstMs = 0;
 const pivot = new THREE.Vector3();
 const marker = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xff3030, depthTest: false }));
 marker.renderOrder = 999; marker.visible = false; scene.add(marker);
@@ -143,7 +143,7 @@ function stats() {
   });
   const r = (x) => +(x / MB).toFixed(2);
   return {
-    fps: +fpsAvg.toFixed(1), frameMs: +msAvg.toFixed(2), drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles,
+    fps: +fps.toFixed(1), frameMs: +frameMs.toFixed(2), worstMs: +worstMs.toFixed(1), drawCalls: renderer.info.render.calls, triangles: renderer.info.render.triangles,
     loadedTiles: loaded, visibleTiles: visible, queued: st.queued, downloading: st.downloading, parsing: st.parsing, failed: st.failed,
     maxVisibleDepth: maxDepth, visibleByDepth: byDepth, geometryMB: r(geo), textureMB: r(tex), gpuMB: r(geo + tex),
     errorTarget: tiles.errorTarget, lruMaxMB: Math.round(tiles.lruCache.maxBytesSize / MB), eye: w2src(camera.position).map((v) => +v.toFixed(3)),
@@ -156,12 +156,18 @@ function addToggle(label, fn) {
   const l = document.createElement('label'), c = document.createElement('input'); c.type = 'checkbox';
   c.onchange = () => fn(c.checked); l.append(c, ' ' + label); ctl.append(l);
 }
-function addSlider(label, min, max, val, fn) {
+function addSlider(label, min, max, val, fn, fmt = (v) => v) {
   const row = document.createElement('div'), t = document.createElement('span'), s = document.createElement('input');
   row.className = 'row'; Object.assign(s, { type: 'range', min, max, step: label.includes('LRU') ? 64 : 1, value: val });
-  const upd = () => { t.textContent = label.replace('{v}', s.value); };
+  const upd = () => { t.textContent = label.replace('{v}', fmt(+s.value)); };
   s.oninput = () => { fn(+s.value); upd(); }; upd(); row.append(t, s); ctl.append(row); return { s, upd };
 }
+// zoom = camera distance to the pivot, log scale from ZOOM_MIN (right) to 4 x the model diagonal (left)
+const ZOOM_MIN = 0.05, zoomMax = () => diag * 4;
+const zoom2dist = (v) => zoomMax() * (ZOOM_MIN / zoomMax()) ** (v / 1000);
+const dist2zoom = (d) => Math.round((1000 * Math.log(zoomMax() / d)) / Math.log(zoomMax() / ZOOM_MIN));
+const zoom = addSlider('zoom {v} m', 0, 1000, 0, (v) => { camera.position.sub(pivot).setLength(zoom2dist(v)).add(pivot); lookAtPivot(); },
+  (v) => +zoom2dist(v).toPrecision(3));
 addSlider('error target {v} px', 1, 128, tiles.errorTarget, (v) => (tiles.errorTarget = v));
 const lru = addSlider('LRU {v} MB', 64, LRU_MAX_MB, LRU_MB, setLruMB);
 const CM = DebugTilesPlugin.ColorModes;
@@ -169,6 +175,7 @@ addToggle('colour by tile depth', (on) => { debug.colorMode = on ? CM.CUSTOM_COL
 addToggle('wireframe', (on) => { S.wireframe = on; for (const t of tiles.lruCache.itemSet.keys()) t.engineData?.scene?.traverse((o) => { if (o.material) o.material.wireframe = on; }); });
 addToggle('bounding boxes', (on) => { debug.displayBoxBounds = on; debug.update(); });
 addToggle('freeze LOD', (on) => (S.frozen = on));
+addToggle('uncapped fps (GPU-paced)', (on) => setUncapped(on));
 const hint = document.createElement('div'); hint.className = 'hint';
 hint.textContent = 'drag orbit | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit'; ctl.append(hint);
 
@@ -181,22 +188,38 @@ tiles.addEventListener('load-model', ({ scene: s }) => s.traverse((o) => {
 }));
 
 // ---------- loop ----------
-renderer.setAnimationLoop(() => {
-  const now = performance.now(), dt = now - lastT; lastT = now; frames++;
-  msAvg += (dt - msAvg) * 0.1; fpsAvg += (1000 / Math.max(dt, 0.1) - fpsAvg) * 0.1;
+function frame() {
+  const now = performance.now(), dt = now - lastT; lastT = now; frames++; worst = Math.max(worst, dt);
   camera.updateMatrixWorld();
   tiles.setResolutionFromRenderer(camera, renderer);
   if (!S.frozen) tiles.update();
   renderer.render(scene, camera);
-  if (frames % 15) return;
+  if (now - winT < 250) return; // HUD: frames actually rendered in the last window, and its slowest frame
+  fps = (frames * 1000) / (now - winT); frameMs = (now - winT) / frames; worstMs = worst; frames = worst = 0; winT = now;
   const mb = Math.round(tiles.lruCache.maxBytesSize / MB); // slider shows the real cap
   if (document.activeElement !== lru.s && +lru.s.value !== mb) { lru.s.max = Math.max(LRU_MAX_MB, mb); lru.s.value = mb; lru.upd(); }
+  if (document.activeElement !== zoom.s) { zoom.s.value = dist2zoom(camera.position.distanceTo(pivot)); zoom.upd(); }
   const s = stats();
   statsEl.textContent =
-    `${s.fps} fps  ${s.frameMs} ms\ncalls ${s.drawCalls}  tris ${(s.triangles / 1e6).toFixed(2)}M\n` +
+    `${s.fps} fps  ${s.frameMs} ms  worst ${s.worstMs} ms\ncalls ${s.drawCalls}  tris ${(s.triangles / 1e6).toFixed(2)}M\n` +
     `tiles loaded ${s.loadedTiles}  visible ${s.visibleTiles}\ndl ${s.downloading}  parse ${s.parsing}  queued ${s.queued}\n` +
     `max depth ${s.maxVisibleDepth}\nGPU ~${s.gpuMB} MB (geo ${s.geometryMB} + tex ${s.textureMB})\ncam ${s.eye.map((v) => v.toFixed(1))}`;
-});
+}
+// capped: rAF at the display rate (Safari: 60 Hz unless its 60fps feature flag is off). Uncapped: back-to-back tasks with at
+// most 2 frames in flight (GPU fences), so fps counts frames the GPU finished, not how fast JS can queue them.
+const gl = renderer.getContext(), fences = [], tick = new MessageChannel();
+tick.port1.onmessage = () => {
+  if (!S.uncapped) return;
+  while (fences.length && gl.getSyncParameter(fences[0], gl.SYNC_STATUS) === gl.SIGNALED) gl.deleteSync(fences.shift());
+  if (fences.length < 2) { frame(); fences.push(gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0)); gl.flush(); }
+  tick.port2.postMessage(0);
+};
+function setUncapped(on) {
+  S.uncapped = on; lastT = performance.now();
+  if (on) { renderer.setAnimationLoop(null); tick.port2.postMessage(0); }
+  else { while (fences.length) gl.deleteSync(fences.shift()); renderer.setAnimationLoop(frame); }
+}
+renderer.setAnimationLoop(frame);
 
 const ready = new Promise((resolve, reject) => {
   tiles.addEventListener('load-tileset', function once() {
