@@ -208,5 +208,6 @@ const ready = new Promise((resolve, reject) => {
   tiles.addEventListener('load-error', (e) => console.warn('[tiles] load-error', e.url, e.error?.message));
   setTimeout(() => reject(new Error('tileset did not load in 30 s: ' + TILESET)), 30000);
 });
-window.lod = { tiles, camera, stats, setView, ready };
-</script></body></html>
+window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl };
+</script>
+<script type="module" src="selinf.js"></script></body></html>
