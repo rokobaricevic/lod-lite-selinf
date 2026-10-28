@@ -43,7 +43,7 @@ function cloud(group, byClass) {
   group.clear();
   let n = 0;
   for (const [c, flat] of Object.entries(byClass || {})) {
-    const g = new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(flat, 3));
+    const g = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(flat, 3));
     group.add(new THREE.Points(g, new THREE.PointsMaterial({ color: COLOR[c] || '#828A92', size: 4, sizeAttenuation: false, depthTest: !through })));
     n += flat.length / 3;
   }
@@ -62,9 +62,12 @@ lod.el.addEventListener('click', async (e) => {
   const t0 = performance.now();
   const tick = setInterval(() => (status.textContent = `running... ${((performance.now() - t0) / 1000).toFixed(0)} s`), 250);
   try {
-    // text/plain body: no CORS preflight
-    const res = await (await fetch(API + '/click', { method: 'POST', body: JSON.stringify({ origin: o, direction: p.map((v, i) => v - o[i]) }) })).json();
+    // text/plain body: no CORS preflight. Answer: uint32 header length, JSON header, float32 xyz per layer
+    const buf = await (await fetch(API + '/click', { method: 'POST', body: JSON.stringify({ origin: o, direction: p.map((v, i) => v - o[i]) }) })).arrayBuffer();
+    const n = new DataView(buf).getUint32(0, true), res = JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 4, n)));
     if (res.error) throw new Error(res.error);
+    let at = 4 + n;
+    for (const part of [res.points, res.full]) for (const c in part) { part[c] = new Float32Array(buf, at, part[c] * 3); at += part[c].byteLength; }
     seed.position.fromArray(res.seed);
     const ns = cloud(sel, res.points), nf = cloud(full, res.full);
     const grow = res.photos.filter((x) => x.phase === 'grow').length, s = res.seconds;
