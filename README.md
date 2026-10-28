@@ -23,4 +23,4 @@ The build is resumable, and takes about 30 min and up to ~12 GB RAM for the 50 M
 
 `viewer.html` is three.js + 3d-tiles-renderer from jsDelivr (needs internet), with no build step.
 Controls: drag to orbit, right/shift-drag to pan, wheel to zoom to the cursor, double-click to set the
-pivot, `F` to fit. URL params: `?tileset=`, `?lru=<MB>`.
+pivot, `F` to fit. URL params: `?tileset=`, `?lru=<MB>`, `?uncapped` (render as fast as the GPU finishes frames).
