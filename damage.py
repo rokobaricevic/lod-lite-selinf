@@ -28,6 +28,7 @@ COLORS = {"Crack": "#FF2D2D", "ExposedRebars": "#FF8A00", "Rust": "#FF2DAF", "Sp
 RECORD = np.dtype([("asset", "<u4"), ("px", "<f4"), ("py", "<f4"), ("conf", "<f4")])   # points_sources.bin
 PICKS, MIN_GAIN = 3, 0.10              # photos per item; a later pick must add >= 10 % of the item's points
 PAD, MIN_PAD, MIN_CROP, MAX_SIDE = 0.25, 48, 384, 1024   # crop: padding (of the longer side, px), size (px)
+MIN_BOX = 16                                             # px of the photo, the damage's box at least
 Image.MAX_IMAGE_PIXELS = None
 
 
@@ -122,6 +123,24 @@ def picks(owner, ph, px, py, conf, starts, counts):
     return out
 
 
+def retry(fn, *args):
+    """Windows refuses to rename or delete a folder while the server is sending a file in it: wait that out (30 s)."""
+    for k in range(60):
+        try:
+            return fn(*args)
+        except PermissionError:
+            if k == 59:
+                raise
+            time.sleep(0.5)
+
+
+def min_box(b):
+    """At least MIN_BOX px each way (one record, or one row of them, is a line): the drawn box stays a box."""
+    (x0, y0, x1, y1), h = b, MIN_BOX / 2
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return [min(x0, cx - h), min(y0, cy - h), max(x1, cx + h), max(y1, cy + h)]
+
+
 def crop_box(b, W, H):
     """The damage's pixel box padded, grown to MIN_CROP (centred), shifted into the photo where it fits, clipped."""
     pad, box = max(PAD * max(b[2] - b[0], b[3] - b[1]), MIN_PAD), []
@@ -137,6 +156,7 @@ def crop_photo(job):
     """One photo's crops, decoded once (at 1/2, 1/4 or 1/8 when every crop shrinks at least that much) ->
     ([the damage's box in each crop, fractions], missing, EXIF-rotated)."""
     path, crops = job
+    crops = [(out, min_box(b)) for out, b in crops]
     try:
         im = Image.open(path)
     except FileNotFoundError:
@@ -234,10 +254,16 @@ def main():
     (tmp / "damage.bin").write_bytes(blob)
     (tmp / "damage.json").write_bytes(text)
     old = OUT.with_name("damage.old")
-    shutil.rmtree(old, ignore_errors=True)
+    if old.exists():
+        retry(shutil.rmtree, old)
     if OUT.exists():
-        OUT.rename(old)
-    tmp.rename(OUT)
+        retry(OUT.rename, old)
+    try:
+        retry(tmp.rename, OUT)
+    except OSError:
+        if old.exists():
+            old.rename(OUT)   # the previous data stays served
+        raise
     shutil.rmtree(old, ignore_errors=True)
     phase("write")
 

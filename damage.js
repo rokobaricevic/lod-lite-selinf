@@ -14,7 +14,8 @@ css.textContent = `
 .dm-hud{margin-top:6px;border-top:1px solid #444;padding-top:4px}
 .dm-hud label{display:flex!important;align-items:center;gap:5px}
 .dm-sw{display:inline-block;width:10px;height:10px;border-radius:2px;flex:none}
-.dm-panel{position:fixed;top:6px;right:6px;width:300px;max-height:calc(100% - 12px);box-sizing:border-box;overflow-y:auto;
+.dm-panel{position:fixed;top:calc(6px + env(safe-area-inset-top));right:calc(6px + env(safe-area-inset-right));width:300px;
+ max-height:calc(100% - 12px - env(safe-area-inset-top) - env(safe-area-inset-bottom));box-sizing:border-box;overflow-y:auto;
  overscroll-behavior:contain;z-index:10;font:12px/1.4 ui-monospace,Menlo,monospace;color:#d8d8d8;background:rgba(0,0,0,.75);
  padding:4px 10px 10px;border-radius:3px}
 .dm-head{display:flex;align-items:center;gap:6px;font-weight:bold}
@@ -29,7 +30,7 @@ css.textContent = `
 .dm-view{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;
  justify-content:center;gap:6px;touch-action:none;user-select:none;font:13px ui-monospace,Menlo,monospace;color:#ddd}
 .dm-view .dm-ph{margin:0;cursor:default}
-.dm-view img{width:auto;max-width:96vw;max-height:86vh}
+.dm-view img{width:auto;max-width:96vw;max-height:86vh;max-height:86dvh} /* dvh: iOS's vh is taller than the visible area */
 .dm-view button{position:absolute;min-width:44px;min-height:44px;background:rgba(0,0,0,.45);border:0;border-radius:4px;color:#fff;
  font:30px/1 sans-serif;cursor:pointer}
 .dm-view .x{top:calc(4px + env(safe-area-inset-top));right:calc(4px + env(safe-area-inset-right))}
@@ -118,34 +119,45 @@ async function load() {
 load().catch((e) => (status.textContent = 'damage: failed: ' + e.message));
 
 // ---------- tap to select ----------
-const active = new Set();
-let tap = null;
+const active = new Set(), caster = new THREE.Raycaster(), sray = new THREE.Ray(), ibox = new THREE.Box3(), at = new THREE.Vector3();
+let tap = null, miss = 0;
 lod.el.addEventListener('pointerdown', (e) => {
+  clearTimeout(miss); // the 2nd tap of a double-tap / dblclick (the pivot) keeps the panel
   if (e.isPrimary) active.clear(); // a primary down means no other pointer of its kind is down: drop any stale ids
   active.add(e.pointerId);
   tap = active.size === 1 && e.button === 0 && !e.altKey ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() } : null;
 });
 for (const ev of ['pointerup', 'pointercancel']) addEventListener(ev, (e) => active.delete(e.pointerId), true);
+const missed = () => { clearTimeout(miss); miss = setTimeout(() => select(-1), 350); };
 lod.el.addEventListener('pointerup', (e) => {
   const d = tap;
   tap = null;
   if (!d || d.id !== e.pointerId || e.altKey || lod.inferArmed || !Q) return; // armed: this tap belongs to selinf.js
   const mouse = e.pointerType === 'mouse';
   if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= (mouse ? 5 : 10) || performance.now() - d.t >= 500) return;
-  const hit = lod.pick(lod.ndcOf(e));
-  if (!hit) return select(-1);
-  const p = lod.w2src(hit.point), px = (2 * Math.tan((lod.camera.fov * Math.PI) / 360) * hit.distance) / lod.el.clientHeight;
-  const r = Math.max(0.02, (mouse ? 8 : 16) * px); // a fingertip is less precise than a cursor
-  let best = -1, bd = r * r;
+  const ndc = lod.ndcOf(e), hit = lod.pick(ndc);
+  if (!hit) return missed();
+  // the damage point nearest the tap ON SCREEN (a 3D radius at the hit shrinks to a pixel in grazing views), among the
+  // points not behind the surface: t <= the hit's depth + the 1 % the depth pull shows through, + 2 cm
+  caster.setFromCamera(ndc, lod.camera);
+  const o = lod.w2src(caster.ray.origin), dir = lod.w2src(caster.ray.direction);
+  sray.origin.fromArray(o); sray.direction.fromArray(dir);
+  const k = (2 * Math.tan((lod.camera.fov * Math.PI) / 360)) / lod.el.clientHeight; // px size / depth
+  const R = mouse ? 8 : 16, tmax = hit.distance * 1.02 + 0.02; // a fingertip is less precise than a cursor
+  let best = -1, bs = R * R;
   J.items.forEach((it, i) => {
-    const b = it.b;
-    if (!on[it.c] || p[0] < b[0] - r || p[0] > b[3] + r || p[1] < b[1] - r || p[1] > b[4] + r || p[2] < b[2] - r || p[2] > b[5] + r) return;
+    if (!on[it.c]) return;
+    ibox.setFromArray(it.b).expandByScalar(R * k * tmax);
+    if (!ibox.containsPoint(sray.origin) && !(sray.intersectBox(ibox, at) && at.distanceTo(sray.origin) <= tmax)) return;
     for (let j = it.s * 3, end = (it.s + it.n) * 3; j < end; j += 3) {
-      const dx = B[0] + Q[j] * K[0] - p[0], dy = B[1] + Q[j + 1] * K[1] - p[1], dz = B[2] + Q[j + 2] * K[2] - p[2];
-      const dd = dx * dx + dy * dy + dz * dz;
-      if (dd < bd) { bd = dd; best = i; }
+      const x = B[0] + Q[j] * K[0] - o[0], y = B[1] + Q[j + 1] * K[1] - o[1], z = B[2] + Q[j + 2] * K[2] - o[2];
+      const t = x * dir[0] + y * dir[1] + z * dir[2];
+      if (t <= 0 || t > tmax) continue;
+      const s2 = (x * x + y * y + z * z - t * t) / (k * k * t * t); // squared screen distance, px
+      if (s2 < bs) { bs = s2; best = i; }
     }
   });
+  if (best < 0) return missed();
   select(best);
 });
 
@@ -206,7 +218,7 @@ function openView(k) {
   vk = (k + n) % n;
   const f = crop(vk, J.classes[it.c].color), img = f.firstChild;
   img.loading = 'eager';
-  img.onload = () => (img.style.width = `min(96vw, ${((86 * img.naturalWidth) / img.naturalHeight).toFixed(2)}vh)`); // fit, small crops scale up
+  img.onload = () => (img.style.width = `min(96vw, ${((86 * img.naturalWidth) / img.naturalHeight).toFixed(2)}dvh)`); // fit, small crops scale up
   bp.hidden = bn.hidden = n < 2;
   view.replaceChildren(f, h('div', 'dm-vc', `${J.photos[it.p[vk][0]]}  ${vk + 1} / ${n}`), bx, bp, bn);
   view.style.display = '';
@@ -230,5 +242,5 @@ addEventListener('keydown', (e) => {
   if (vk >= 0) {
     if (e.key === 'Escape') { closeView(); e.stopPropagation(); }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') openView(vk + (e.key === 'ArrowLeft' ? -1 : 1));
-  } else if (e.key === 'Escape' && sel >= 0) { select(-1); e.stopPropagation(); }
+  } else if (e.key === 'Escape' && sel >= 0 && !lod.inferArmed) { select(-1); e.stopPropagation(); } // armed: Esc disarms first
 }, true);
