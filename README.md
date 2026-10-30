@@ -30,9 +30,10 @@ Controls: drag to orbit, right/shift-drag to pan, wheel to zoom to the cursor, d
 pivot, `F` to fit; on a phone or tablet: drag to orbit, pinch to zoom, two-finger drag to pan, double-tap to set the
 pivot. The dock at the bottom: Slojevi (damage classes, opacity), Prepoznaj oštećenja (selective inference),
 Prikaži cijeli most (fit), Tehnički prikaz (the developer HUD: fps, tiles, LOD sliders; hidden by default).
-URL params: `?tileset=`, `?lru=<MB>` (default 3072, 768 on touch devices), `?uncapped` (render as fast as the GPU
+URL params: `?tileset=`, `?lru=<MB>` (default 3072, 512 on touch devices), `?uncapped` (render as fast as the GPU
 finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
-`?damage=<dir>` (default `out/damage/`), `?title=` (the structure's name in the title pill).
+`?damage=<dir>` (default `out/damage/`), `?title=` (the structure's name in the title pill). On touch devices the LOD error target
+is 32 px (16 elsewhere): iOS Safari kills a tab that holds ~1 GB, and a close view of the deck at full detail does.
 
 ## Damage (the app's, from lynceus)
 
