@@ -1,4 +1,8 @@
 source/
 work/
 out/
+job/
 __pycache__/
+.pytest_cache/
+build/
+selinf_core.*
