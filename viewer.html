@@ -50,6 +50,9 @@ scene.add(camera);
 
 const ktx2 = new KTX2Loader().setTranscoderPath('https://cdn.jsdelivr.net/npm/three@0.186.1/examples/jsm/libs/basis/').detectSupport(renderer);
 const tiles = new TilesRenderer(TILESET);
+// the browser keeps ~6 connections to a server: 4 for tiles leaves room for an alt-click, which otherwise waits behind
+// tile downloads for as long as they take (minutes over the PC's ~1 MB/s upload)
+tiles.downloadQueue.maxJobsPerOrigin = 4;
 tiles.registerPlugin(new GLTFExtensionsPlugin({ meshoptDecoder: MeshoptDecoder, ktxLoader: ktx2 }));
 const PALETTE = [0x4da3ff, 0x4dd17a, 0xffc24d, 0xff6b6b, 0xc77dff, 0x4de3e3, 0xffffff];
 const debug = new DebugTilesPlugin({
