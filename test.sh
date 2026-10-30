@@ -128,7 +128,6 @@ New-Item -ItemType Directory -Force -Path $root, "$root\job", "$root\logs", "$ro
 foreach ($f in 'job_params.json', 'photos.json') {
   if (-not (Test-Path -LiteralPath "$root\job\$f")) { throw "job\$f is missing: the job's frozen parameters and photo list" }
 }
-if (-not (Test-Path -LiteralPath "$root\out\tileset.json")) { throw "out\tileset.json is missing: run ./test.sh data first" }
 foreach ($dep in @(
     @('pybind11', 'https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz', 1),
     @('embree', 'https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip', 0),
@@ -183,6 +182,9 @@ if ($out -notmatch '__EXIT__ 0\b') { exit 1 }
 Wait-Task 'selinf-test' 30 'next\ stays in use'
 PS
 pc "$PS_WAIT" "$STEP" || { echo "test.sh: the PC tests failed; the running server was not touched" >&2; exit 1; }
+
+pc 'if (-not (Test-Path -LiteralPath "$root\out\tileset.json")) { throw "out\tileset.json is missing: run ./test.sh data" }' ||
+  { echo "test.sh: the running server was not touched" >&2; exit 1; }
 
 # stop the server (kill_pc; and one still loading, not yet listening) and wait for its task to end; then the code files
 # (the folder's top-level files) -> old, next's -> the folder. The data folders are not touched.
