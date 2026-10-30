@@ -1,10 +1,10 @@
 // Selective inference: alt-click the bridge -> the PC runs the damage models only on the photos
-// around the click (lynceus experiments/selective_inference/selinf.py) and the result is drawn here.
-// ?selinf=<url> overrides the server (default http://127.0.0.1:8765, an ssh tunnel to the PC).
+// around the click (selinf.py, which also serves this page) and the result is drawn here.
+// ?selinf=<url> overrides the server (default: the one this page came from).
 import * as THREE from 'three';
 
 const lod = window.lod;
-const API = new URLSearchParams(location.search).get('selinf') || 'http://127.0.0.1:8765';
+const API = new URLSearchParams(location.search).get('selinf') ?? '';
 const COLOR = { Crack: '#FF2D2D', ExposedRebars: '#FF8A00', Rust: '#FF2DAF', Spalling: '#FFD60A',
   Wetspot: '#00E5FF', Cavity: '#7CFF00', Efflorescence: '#C42DFF' }; // = the product palette (drawings/colors.py)
 const IDLE = 'selective inference: alt-click the bridge';

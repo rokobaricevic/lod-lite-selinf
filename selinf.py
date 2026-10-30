@@ -3,25 +3,33 @@ baked by selinf_core (selinf.cpp, which describes the loop); it calls back into 
 
     python selinf.py      # PC: loads the survey + models, serves 127.0.0.1:8765   (./test.sh deploys and starts it)
 
+GET /: the lod-lite viewer (viewer.html, selinf.js, out/'s tiles); GET /health: JSON.
 POST /click {"origin": [x,y,z], "direction": [x,y,z]} (a camera ray, bake frame) -> selinf_core's answer: uint32 LE n,
   n bytes of JSON header, then each layer's float32 xyz; an error -> 500, the same form with {"error": ...}.
-GET /health, /quit: JSON.
+SELINF_AUTH=user:pass: every request needs that HTTP Basic login (./test.sh starts the server so).
+SELINF_REPO: the lynceus checkout whose pipeline code, worker venv and job data this reads; it never writes there.
 """
 
+import base64
+import functools
+import hmac
 import json
 import os
+import posixpath
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote, urlsplit
 
 import cv2
 import numpy as np
 
+ROOT = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("SELINF_REPO", "C:/dev/lynceus"))
-WORK = Path(os.environ.get("SELINF_WORK", "C:/Users/rokob/selinf/work"))
+WORK = Path(os.environ.get("SELINF_WORK", ROOT / "job"))   # job_params.json + photos.json in, clicks.jsonl out
 for _p in ("pipeline", "pipeline/training", "pipeline/cook", "apps/worker/src", "apps/server/src",
            "packages/protocol/python"):
     if str(REPO / _p) not in sys.path:
@@ -136,10 +144,17 @@ class Models:
         return m
 
 
-def serve(core, models, classes, port: int = 8765):
+def server(core, infer, classes, root, port=8765, auth=None):
+    """The viewer (root's viewer.html, selinf.js and out/) and the clicks, on 127.0.0.1:port. With auth ("user:pass")
+    every request needs that HTTP Basic login: the public address forwards here."""
     lock = threading.Lock()
+    login = auth and ("Basic " + base64.b64encode(auth.encode()).decode()).encode()
 
-    class H(BaseHTTPRequestHandler):
+    class H(SimpleHTTPRequestHandler):
+        def end_headers(self):  # revalidate every time: a rebuilt tile keeps its url
+            self.send_header("Cache-Control", "no-cache")
+            super().end_headers()
+
         def reply(self, code, body, kind="application/json"):
             self.send_response(code)
             for k, v in (("Access-Control-Allow-Origin", "*"), ("Content-Type", kind), ("Content-Length", str(len(body)))):
@@ -147,30 +162,53 @@ def serve(core, models, classes, port: int = 8765):
             self.end_headers()
             self.wfile.write(body)
 
+        def allowed(self):
+            if not login or hmac.compare_digest(self.headers.get("Authorization", "").encode(), login):
+                return True
+            self.send_response(401)
+            self.send_header("WWW-Authenticate", 'Basic realm="lod-lite-selinf"')
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+
         def do_GET(self):
-            if self.path == "/quit":
-                self.reply(200, b'{"bye": true}')
-                threading.Thread(target=srv.shutdown).start()
-            else:
-                self.reply(200, json.dumps({"ok": True, "photos": len(core.names), "classes": classes}).encode())
+            if not self.allowed():
+                return
+            path = posixpath.normpath(unquote(urlsplit(self.path).path))
+            if path == "/health":
+                return self.reply(200, json.dumps({"ok": True, "photos": len(core.names), "classes": classes}).encode())
+            path = "/viewer.html" if path == "/" else path
+            if path in ("/viewer.html", "/selinf.js") or path.startswith("/out/") and os.path.isfile(self.translate_path(path)):
+                self.path = path   # nothing else under root: source/, work/, job/ and the code stay private
+                return super().do_GET()
+            self.send_error(404)
+
+        def do_HEAD(self):
+            self.send_error(405)
 
         def do_POST(self):
+            if not self.allowed():
+                return
+            if urlsplit(self.path).path != "/click":
+                return self.send_error(404)
             try:
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 with lock:   # one click at a time: one GPU, and selinf_core's localtime + clicks.jsonl append
-                    body, code = core.click(req["origin"], req["direction"], models.infer), 200
+                    body, code = core.click(req["origin"], req["direction"], infer), 200
             except Exception as exc:  # noqa: BLE001 -- the viewer shows it
                 head = json.dumps({"error": repr(exc)}).encode()
                 head += b" " * (-len(head) % 4)
                 body, code = len(head).to_bytes(4, "little") + head, 500
             self.reply(code, body, "application/octet-stream")
 
+        def log_request(self, code="-", size="-"):   # the clicks and the errors, not every tile
+            if self.command == "POST" or isinstance(code, int) and code >= 400:
+                super().log_request(code, size)
+
         def log_message(self, fmt, *args):
             print(time.strftime("%H:%M:%S"), fmt % args, flush=True)
 
-    srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    print(f"serving http://127.0.0.1:{port}", flush=True)
-    srv.serve_forever()
+    return ThreadingHTTPServer(("127.0.0.1", port), functools.partial(H, directory=str(root)))
 
 
 if __name__ == "__main__":
@@ -182,4 +220,7 @@ if __name__ == "__main__":
     core = selinf_core.Survey(str(REPO / "data"), str(WORK), models.grids)
     print(f"survey + models loaded in {time.perf_counter() - t:.0f} s: {len(core.names)} photos, grids {models.grids}",
           flush=True)
-    serve(core, models, (job / "inference" / "classes.txt").read_text().split())
+    auth = os.environ.get("SELINF_AUTH")
+    srv = server(core, models.infer, (job / "inference" / "classes.txt").read_text().split(), ROOT, auth=auth)
+    print(f"serving http://127.0.0.1:{srv.server_address[1]}/" + (" (login required)" if auth else ""), flush=True)
+    srv.serve_forever()

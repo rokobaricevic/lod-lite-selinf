@@ -5,12 +5,16 @@ thresholds / classes, and a small points.json + points.bin. Both sides load the 
     ./test.sh test        (builds selinf_core, then runs this file with the worker venv)
 """
 
+import base64
 import hashlib
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 REPO = Path(os.environ.get("SELINF_REPO", "C:/dev/lynceus"))
 for _p in ("pipeline", "pipeline/training", "pipeline/cook", "apps/worker/src", "apps/server/src",
@@ -487,3 +491,47 @@ def test_a_clicks_log_that_cannot_be_written_is_an_error(tmp_path):
     (s.work / "clicks.jsonl").mkdir()    # the append cannot open it
     with pytest.raises(RuntimeError, match="clicks.jsonl"):
         s.core.click([6.0, 0.3, 3.0], [0.0, -0.3, -3.0], strip_infer(s, []))
+
+
+def test_the_server_wants_the_login_and_serves_only_the_viewer(tmp_path):
+    import selinf
+
+    s = make_survey(tmp_path)
+    site = tmp_path / "site"
+    (site / "out" / "tiles").mkdir(parents=True)
+    for f in ("viewer.html", "selinf.js", "out/tileset.json", "out/tiles/0.glb", "selinf.py", "job_params.json"):
+        (site / f).write_text(f)
+    srv = selinf.server(s.core, strip_infer(s, []), ["Crack"], site, port=0, auth="test:test")
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def get(path, login="test:test", body=None):
+        head = {"Authorization": "Basic " + base64.b64encode(login.encode()).decode()} if login else {}
+        try:
+            with urlopen(Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", body, head)) as r:
+                return r.status, r.read()
+        except HTTPError as e:
+            return e.code, e.headers.get("WWW-Authenticate") if e.code == 401 else e.read()
+
+    click = json.dumps({"origin": [6.0, 0.3, 3.0], "direction": [0.0, -0.3, -3.0]}).encode()
+    try:
+        for path, body in (("/", None), ("/out/tiles/0.glb", None), ("/health", None), ("/click", click)):
+            assert get(path, None, body) == (401, 'Basic realm="lod-lite-selinf"')
+            assert get(path, "test:wrong", body)[0] == 401
+        assert get("/") == get("/viewer.html") == (200, b"viewer.html")
+        assert get("/selinf.js") == (200, b"selinf.js") and get("/out/tiles/0.glb?x=1") == (200, b"out/tiles/0.glb")
+        for path in ("/selinf.py", "/job_params.json", "/quit", "/out/../selinf.py", "/out/tiles/", "/source/a.obj"):
+            assert get(path)[0] == 404, path
+        try:
+            urlopen(Request(f"http://127.0.0.1:{srv.server_address[1]}/viewer.html", method="HEAD"))
+        except HTTPError as e:
+            assert e.code == 405
+        else:
+            raise AssertionError("HEAD answered")
+        assert json.loads(get("/health")[1]) == {"ok": True, "photos": len(s.core.names), "classes": ["Crack"]}
+        code, body = get("/click", body=click)
+        assert code == 200 and decode(body)[1]["class"] == "Crack"
+        code, body = get("/click", body=b"{}")
+        assert code == 500 and "error" in decode(body)[1]
+    finally:
+        srv.shutdown()
+        srv.server_close()

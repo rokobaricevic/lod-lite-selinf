@@ -1,13 +1,17 @@
 #!/usr/bin/env bash
-# Try selective inference in the lod-lite viewer:
-#   ./test.sh        PC: copy this folder, build selinf_core (MSVC) and run test_selinf.py there; then swap it in for
-#                    the running server, start selinf.py (GPU), tunnel it to 127.0.0.1:8765, open the viewer
-#   ./test.sh stop   stop the PC server and the tunnel
-#   ./test.sh test   Mac: fetch pybind11 + Embree headers (once), build selinf_core, run test_selinf.py
+# The whole stack runs on the PC, in C:\Users\rokob\lod-lite-selinf: selinf.py serves the viewer, its tiles and the
+# clicks on the PC's 127.0.0.1:8765, behind the login LOGIN (default test:test).
+#   ./test.sh               PC: copy this folder's code, build selinf_core (MSVC) and run test_selinf.py there; then swap
+#                           it in for the running server, start selinf.py (GPU), tunnel it to 127.0.0.1:8765, open the viewer
+#   ./test.sh data          PC: copy source/ work/ out/ (the viewer's tiles, lod.py build's inputs) into the PC folder
+#   ./test.sh public on     publish the PC server on the internet (Tailscale Funnel, https on :8443); off | status
+#   ./test.sh stop          stop the PC server and the tunnel
+#   ./test.sh test          Mac: fetch pybind11 + Embree headers (once), build selinf_core, run test_selinf.py
 # In the viewer: alt-click (option-click) the bridge.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
-LOD="${LOD:-$HOME/dev/lod-lite}"
+LOGIN="${LOGIN:-test:test}"
+[[ "$LOGIN" =~ ^[A-Za-z0-9._-]+:[A-Za-z0-9._-]+$ ]] || { echo "test.sh: LOGIN is user:password, letters digits . _ -" >&2; exit 1; }
 tunnel="8765:127.0.0.1:8765"
 kill_pc='Get-NetTCPConnection -LocalPort 8765 -State Listen -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }'
 
@@ -33,13 +37,24 @@ if [ "${1:-}" = test ]; then
   exit
 fi
 
+if [ "${1:-}" = public ]; then   # Funnel: https://<the PC's tailnet name>:8443/ -> the PC's 127.0.0.1:8765, from anywhere
+  case "${2:-status}" in
+    on) ssh lynceus-win "tailscale funnel --bg --https=8443 http://127.0.0.1:8765" ;;
+    off) ssh lynceus-win "tailscale funnel --https=8443 off" ;;
+    status) ;;
+    *) echo "usage: ./test.sh public on|off|status" >&2; exit 1 ;;
+  esac
+  ssh lynceus-win "tailscale funnel status"; exit
+fi
+
 if [ "${1:-}" = stop ]; then
   ssh lynceus-win "powershell -NoProfile -Command \"$kill_pc\"" || true
   pkill -f "$tunnel" || true
   echo stopped; exit 0
 fi
 
-# ---- PC: C:\Users\rokob\selinf\ holds next (staged, built, tested), code (served), deps, logs and work. Each step is
+# ---- PC: C:\Users\rokob\lod-lite-selinf\ holds the served code (its top-level files), the data (source, work, out),
+# job (job_params.json, photos.json, clicks.jsonl), next (staged, built, tested), old (the previous code), deps and logs. Each step is
 # PowerShell sent as -EncodedCommand (UTF-16LE base64: nothing to quote through ssh and cmd.exe); what needs cmd
 # (vcvars64 + cl, a scheduled task's job) is a .bat the step writes and runs by its path, which has no spaces.
 ps() { IFS= read -r -d '' "$1" || true; }   # ps NAME <<'PS' ... PS: NAME = the PowerShell text (bash 3.2-safe)
@@ -52,11 +67,11 @@ pc() {   # run PS_HEAD + the arguments (PowerShell) on the PC
 ps PS_HEAD <<'PS'
 $ErrorActionPreference = 'Stop'; $ProgressPreference = 'SilentlyContinue'
 trap { "PC error: $_"; $_.InvocationInfo.PositionMessage; exit 1 }   # plain text, not -EncodedCommand's CLIXML
-$root = 'C:\Users\rokob\selinf'; $py = 'C:\dev\lynceus\apps\worker\.venv\Scripts\python.exe'
+$root = 'C:\Users\rokob\lod-lite-selinf'; $py = 'C:\dev\lynceus\apps\worker\.venv\Scripts\python.exe'
 $tar = "$env:SystemRoot\System32\tar.exe"; $curl = "$env:SystemRoot\System32\curl.exe"
 function Check($what) { if ($LASTEXITCODE) { throw "$what failed (exit $LASTEXITCODE)" } }
 function Clear-Dir([string]$p) {   # removes one of the folders test.sh owns, nothing else
-  if ($p -notmatch '^C:\\Users\\rokob\\selinf\\(next|old|deps\\(pybind11|embree|python))$') { throw "refusing to remove '$p'" }
+  if ($p -notmatch '^C:\\Users\\rokob\\lod-lite-selinf\\(next|old|deps\\(pybind11|embree|python))$') { throw "refusing to remove '$p'" }
   if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force }
 }
 PS
@@ -65,11 +80,11 @@ PS
 # "__EXIT__ <code>" and "__DONE__" when it exits. A task cannot delete itself: finished ones are cleared here.
 ps PS_START <<'PS'
 function Start-Py([string]$Name, [string]$Dir, [string]$PyArgs) {
-  Get-ScheduledTask -TaskName 'LynceusSelInf_*' -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Running' } |
+  Get-ScheduledTask -TaskName 'LodSelinf_*' -ErrorAction SilentlyContinue | Where-Object { $_.State -ne 'Running' } |
     ForEach-Object { cmd /c "schtasks /Delete /TN $($_.TaskName) /F >nul 2>nul" }
-  $log = "$root\logs\$Name.log"; $bat = "$root\logs\$Name.bat"; $task = "LynceusSelInf_$Name"
+  $log = "$root\logs\$Name.log"; $bat = "$root\logs\$Name.bat"; $task = "LodSelinf_$Name"
   Set-Content -LiteralPath $bat -Encoding ASCII -Value (@(
-    '@echo off', 'set PYTHONIOENCODING=utf-8', "cd /d $Dir", "`"$py`" -u $PyArgs > `"$log`" 2>&1",
+    '@echo off', 'set PYTHONIOENCODING=utf-8', "set SELINF_AUTH=$auth", "cd /d $Dir", "`"$py`" -u $PyArgs > `"$log`" 2>&1",
     "echo __EXIT__ %ERRORLEVEL% >> `"$log`"", "echo __DONE__ >> `"$log`"") -join "`r`n")
   Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
   if (Test-Path -LiteralPath $log) { throw "$log is in use: is $task still running?" }
@@ -83,19 +98,37 @@ function Start-Py([string]$Name, [string]$Dir, [string]$PyArgs) {
 PS
 # Wait-Task: a task's cmd.exe holds the folder it ran in (its current directory) until it ends, just after __DONE__.
 ps PS_WAIT <<'PS'
-function Wait-Task([string]$Name, [int]$Seconds, [string]$Why) {   # until LynceusSelInf_<Name> is not running
-  for ($t = 0; (Get-ScheduledTask -TaskName "LynceusSelInf_$Name" -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' }); $t++) {
-    if ($t -ge $Seconds) { throw "LynceusSelInf_$Name still runs after $Seconds s: $Why" }
+function Wait-Task([string]$Name, [int]$Seconds, [string]$Why) {   # until LodSelinf_<Name> is not running
+  for ($t = 0; (Get-ScheduledTask -TaskName "LodSelinf_$Name" -ErrorAction SilentlyContinue | Where-Object { $_.State -eq 'Running' }); $t++) {
+    if ($t -ge $Seconds) { throw "LodSelinf_$Name still runs after $Seconds s: $Why" }
     Start-Sleep 1
   }
 }
 PS
+PS_HEAD="$PS_HEAD\$auth = '$LOGIN'"   # LOGIN is checked above: nothing to quote
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "PC: folders, and the build's dependencies (fetched once into C:\\Users\\rokob\\selinf\\deps)"
+if [ "${1:-}" = data ]; then   # tar's stream straight into the PC folder: about 10 GB, no copy on either side
+  pc 'New-Item -ItemType Directory -Force -Path $root | Out-Null'
+  COPYFILE_DISABLE=1 tar -C "$here" --no-xattrs --exclude .DS_Store --exclude work/numba -cf - source work out |
+    ssh lynceus-win "C:\Windows\System32\tar.exe -xf - -C C:/Users/rokob/lod-lite-selinf"
+  for d in source work out; do
+    n="$(find "$here/$d" -type f -not -name .DS_Store -not -path '*/work/numba/*' | wc -l | tr -d ' ')"
+    m="$(pc "(Get-ChildItem -LiteralPath \"\$root\\$d\" -Recurse -File).Count" | tr -d '\r')"
+    [ "$n" = "$m" ] || { echo "test.sh: $d has $n files here, $m on the PC" >&2; exit 1; }
+    echo "$d: $n files"
+  done
+  exit
+fi
+
+echo "PC: folders, and the build's dependencies (fetched once into C:\\Users\\rokob\\lod-lite-selinf\\deps)"
 ps STEP <<'PS'
-New-Item -ItemType Directory -Force -Path $root, "$root\work", "$root\logs", "$root\deps" | Out-Null
+New-Item -ItemType Directory -Force -Path $root, "$root\job", "$root\logs", "$root\deps" | Out-Null
+foreach ($f in 'job_params.json', 'photos.json') {
+  if (-not (Test-Path -LiteralPath "$root\job\$f")) { throw "job\$f is missing: the job's frozen parameters and photo list" }
+}
+if (-not (Test-Path -LiteralPath "$root\out\tileset.json")) { throw "out\tileset.json is missing: run ./test.sh data first" }
 foreach ($dep in @(
     @('pybind11', 'https://github.com/pybind/pybind11/archive/refs/tags/v2.13.6.tar.gz', 1),
     @('embree', 'https://github.com/RenderKit/embree/releases/download/v4.4.0/embree-4.4.0.x64.windows.zip', 0),
@@ -111,10 +144,10 @@ foreach ($dep in @(
 PS
 pc "$STEP"
 
-echo "PC: staging this folder in C:\\Users\\rokob\\selinf\\next"
-COPYFILE_DISABLE=1 tar -C "$here" --no-xattrs --exclude build --exclude __pycache__ --exclude .pytest_cache \
-  --exclude 'selinf_core.*' -czf "$tmp/next.tgz" .
-scp -q "$tmp/next.tgz" lynceus-win:C:/Users/rokob/selinf/next.tgz
+echo "PC: staging this folder's code in C:\\Users\\rokob\\lod-lite-selinf\\next"
+(cd "$here" && git ls-files -co --exclude-standard | while read -r f; do if [ -e "$f" ]; then echo "$f"; fi; done |
+  COPYFILE_DISABLE=1 tar --no-xattrs -czf "$tmp/next.tgz" -T -)
+scp -q "$tmp/next.tgz" lynceus-win:C:/Users/rokob/lod-lite-selinf/next.tgz
 ps STEP <<'PS'
 Clear-Dir "$root\next"; New-Item -ItemType Directory -Path "$root\next" | Out-Null
 & $tar -xzf "$root\next.tgz" -C "$root\next"; Check 'unpacking next.tgz'
@@ -134,7 +167,7 @@ Set-Content -LiteralPath "$root\next\build.bat" -Encoding ASCII -Value (@(
 PS
 pc "$STEP" || { echo "test.sh: the PC build failed; the running server was not touched" >&2; exit 1; }
 
-echo "PC: test_selinf.py in next (the scheduled task LynceusSelInf_selinf-test)"
+echo "PC: test_selinf.py in next (the scheduled task LodSelinf_selinf-test)"
 ps STEP <<'PS'
 Start-Py 'selinf-test' "$root\next" '-m pytest -q test_selinf.py'
 PS
@@ -151,24 +184,25 @@ Wait-Task 'selinf-test' 30 'next\ stays in use'
 PS
 pc "$PS_WAIT" "$STEP" || { echo "test.sh: the PC tests failed; the running server was not touched" >&2; exit 1; }
 
-# stop the server (kill_pc; and one still loading, not yet listening) and wait for its task to end; then code -> old,
-# next -> code (a rename fails whole while anything holds the folder; code then stays as it was)
-echo "PC: swapping next in for code"
+# stop the server (kill_pc; and one still loading, not yet listening) and wait for its task to end; then the code files
+# (the folder's top-level files) -> old, next's -> the folder. The data folders are not touched.
+echo "PC: swapping next's code in"
 ps STEP <<'PS'
-Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like "*$root\code\selinf.py*" } |
+Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like "*$root\selinf.py*" } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-Wait-Task 'selinf' 30 'code is unchanged'
-Clear-Dir "$root\old"
-if (Test-Path -LiteralPath "$root\code") { Rename-Item -LiteralPath "$root\code" -NewName old }
-try { Rename-Item -LiteralPath "$root\next" -NewName code } catch { if (Test-Path "$root\old") { Rename-Item "$root\old" code }; throw }
+Wait-Task 'selinf' 30 'the code is unchanged'
+Clear-Dir "$root\old"; New-Item -ItemType Directory -Path "$root\old" | Out-Null
+Get-ChildItem -LiteralPath $root -File -Force | Move-Item -Destination "$root\old"
+Get-ChildItem -LiteralPath "$root\next" -Force | Move-Item -Destination $root
+Remove-Item -LiteralPath "$root\next"
 PS
 pc "$PS_WAIT" "try { $kill_pc } catch { 'stop: ' + \$_ }" "$STEP" ||
-  { echo "test.sh: the swap failed (above). The server is stopped and the old one is NOT restarted; the new build waits in next." >&2
-    echo "  Back to the old build: if code is gone, Rename-Item C:\\Users\\rokob\\selinf\\old code; then start selinf.py from it." >&2; exit 1; }
+  { echo "test.sh: the swap failed (above). The server is stopped and NOT restarted. The previous code files are in old," >&2
+    echo "  the new ones in the folder or still in next: move old's files back into C:\\Users\\rokob\\lod-lite-selinf to go back." >&2; exit 1; }
 
-echo "PC: starting selinf.py from code (the scheduled task LynceusSelInf_selinf)"
+echo "PC: starting selinf.py (the scheduled task LodSelinf_selinf)"
 ps STEP <<'PS'
-Start-Py 'selinf' "$root\code" "$root\code\selinf.py"
+Start-Py 'selinf' $root "$root\selinf.py"
 PS
 pc "$PS_START" "$STEP"
 pkill -f "$tunnel" || true
@@ -176,21 +210,17 @@ ssh -f -N -o ExitOnForwardFailure=yes -L "$tunnel" lynceus-win > /dev/null 2>&1 
 
 echo "loading the survey and models on the PC..."
 for _ in $(seq 60); do
-  curl -s -m 3 http://127.0.0.1:8765/health && echo && break
+  curl -sf -m 3 -u "$LOGIN" http://127.0.0.1:8765/health && echo && break
   sleep 3
 done || true
-if ! curl -s -m 3 -o /dev/null http://127.0.0.1:8765/health; then
+if ! curl -sf -m 3 -o /dev/null -u "$LOGIN" http://127.0.0.1:8765/health; then
   echo "server did not come up; PC log:"; pc 'Get-Content -LiteralPath "$root\logs\selinf.log"' || true
-  echo "the previous build is kept in old. To go back: ./test.sh stop; then on the PC remove C:\\Users\\rokob\\selinf\\code and run" >&2
-  echo "  Rename-Item C:\\Users\\rokob\\selinf\\old code     (and start selinf.py again)" >&2
+  echo "the previous code is kept in old. To go back: ./test.sh stop; then on the PC move old's files back into" >&2
+  echo "  C:\\Users\\rokob\\lod-lite-selinf (replacing the new ones) and start selinf.py again" >&2
   exit 1
 fi
-echo "PC: the new server answers; removing the previous build (old)"
+echo "PC: the new server answers; removing the previous code (old)"
 pc 'Clear-Dir "$root\old"' || echo "test.sh: old is not removed (harmless): see above" >&2
 
-if curl -s -m 2 -o /dev/null http://127.0.0.1:8000/viewer.html; then
-  open http://127.0.0.1:8000/viewer.html
-else
-  (cd "$LOD" && nohup uv run lod.py serve > /tmp/lod-serve.log 2>&1 &)   # opens the viewer itself
-fi
-echo "viewer: http://127.0.0.1:8000/viewer.html  -- alt-click the bridge"
+open http://127.0.0.1:8765/
+echo "viewer: http://127.0.0.1:8765/ (login ${LOGIN%%:*} / ${LOGIN#*:})  -- alt-click the bridge. Public: ./test.sh public on"
