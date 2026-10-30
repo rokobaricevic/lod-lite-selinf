@@ -195,8 +195,8 @@ Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.
 Wait-Task 'selinf' 30 'the code is unchanged'
 Clear-Dir "$root\old"; New-Item -ItemType Directory -Path "$root\old" | Out-Null
 Get-ChildItem -LiteralPath $root -File -Force | Move-Item -Destination "$root\old"
-Get-ChildItem -LiteralPath "$root\next" -Force | Move-Item -Destination $root
-Remove-Item -LiteralPath "$root\next"
+Get-ChildItem -LiteralPath "$root\next" -File -Force | Move-Item -Destination $root
+Clear-Dir "$root\next"   # what the test run left there (__pycache__, .pytest_cache)
 PS
 pc "$PS_WAIT" "try { $kill_pc } catch { 'stop: ' + \$_ }" "$STEP" ||
   { echo "test.sh: the swap failed (above). The server is stopped and NOT restarted. The previous code files are in old," >&2
