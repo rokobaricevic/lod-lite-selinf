@@ -338,8 +338,11 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None):
         extensions_map = {".html": "text/html", ".js": "text/javascript", ".json": "application/json",   # not the
                           ".glb": "model/gltf-binary"}   # Windows registry's guess: a module script must come as JS
 
-        def end_headers(self):  # revalidate every time: a rebuilt tile keeps its url
-            self.send_header("Cache-Control", "no-cache")
+        def end_headers(self):
+            # the page and its scripts: never stored (iOS Safari restores a tab from its cache even under no-cache, so
+            # an old viewer ran against the new server); tiles and data: revalidate (a rebuilt tile keeps its url)
+            page = urlsplit(self.path).path in ("/", "/viewer.html", "/selinf.js", "/damage.js")
+            self.send_header("Cache-Control", "no-store" if page else "no-cache")
             super().end_headers()
 
         def reply(self, code, body, kind="application/json"):

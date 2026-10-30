@@ -525,6 +525,7 @@ def test_the_server_wants_the_login_and_serves_only_the_viewer(tmp_path):
                           headers={"Authorization": "Basic " + base64.b64encode(b"test:test").decode()})
             with urlopen(req) as r:
                 assert r.headers["Content-Type"] == kind, path
+                assert r.headers["Cache-Control"] == ("no-cache" if path.startswith("/out/") else "no-store"), path
         for path in ("/selinf.py", "/job_params.json", "/quit", "/out/../selinf.py", "/out/tiles/", "/source/a.obj"):
             assert get(path)[0] == 404, path
         try:
