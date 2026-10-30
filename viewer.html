@@ -1,15 +1,35 @@
 <!doctype html>
 <html><head><meta charset="utf-8"><title>LOD viewer</title>
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <style>
-html,body{margin:0;height:100%;background:#15171a;overflow:hidden}
-canvas{display:block;width:100%;height:100%;outline:none}
+html,body{margin:0;height:100%;background:#15171a;overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-text-size-adjust:100%}
+canvas{display:block;width:100%;height:100%;outline:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
 #hud{position:fixed;top:6px;left:6px;font:11px/1.35 ui-monospace,Menlo,monospace;color:#d8d8d8;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:3px;min-width:250px;user-select:none}
 #hud pre{margin:0 0 4px;font:inherit}
 #hud label{display:block;cursor:pointer}
 #hud .row{display:flex;gap:6px;align-items:center}
 #hud input[type=range]{flex:1;height:12px}
 #hud .hint{color:#888;margin-top:4px}
+#fold{display:none}
+/* small screens: the HUD folds behind #fold, scrolls, and keeps clear of the notch; open, it covers selinf's button */
+@media (max-width:700px),(pointer:coarse){
+#hud{z-index:5;top:calc(6px + env(safe-area-inset-top));left:calc(6px + env(safe-area-inset-left));-webkit-user-select:none;overflow:auto;overscroll-behavior:contain;
+  max-width:calc(100% - 28px - env(safe-area-inset-left) - env(safe-area-inset-right));max-height:calc(100% - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
+#hud pre{white-space:pre-wrap}
+#fold{display:block;float:right;width:40px;height:40px;margin:-6px -8px 0 4px;padding:0;border:0;background:none;color:inherit;font-size:20px;cursor:pointer}
+#hud.min{min-width:0;padding:0}
+#hud.min #fold{margin:0}
+#hud.min #stats,#hud.min #ctl{display:none}
+#hud.min #err:not(:empty){padding:6px 8px}
+}
+/* fingers */
+@media (pointer:coarse){
+#hud{font-size:12px}
+#hud label,#hud .row{display:flex;align-items:center;gap:6px;min-height:32px}
+#hud input[type=range]{height:32px}
+#hud input[type=checkbox]{width:20px;height:20px;margin:0}
+input:not([type=range],[type=checkbox]),select,textarea{font-size:16px} /* smaller ones make iOS zoom in on focus */
+}
 </style>
 <script type="importmap">{"imports":{
 "three":"https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
@@ -17,7 +37,7 @@ canvas{display:block;width:100%;height:100%;outline:none}
 "3d-tiles-renderer/three":"https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.5.3/build/index.three.js",
 "3d-tiles-renderer/plugins":"https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.5.3/build/index.plugins.js"}}</script>
 </head>
-<body><div id="hud"><pre id="stats"></pre><pre id="err" style="color:#ff8080;white-space:pre-wrap"></pre><div id="ctl"></div></div>
+<body><div id="hud"><button id="fold" aria-label="show/hide the HUD"></button><pre id="stats"></pre><pre id="err" style="color:#ff8080;white-space:pre-wrap"></pre><div id="ctl"></div></div>
 <script>// script and loading errors on the page itself, for whoever has no console open
 const showErr = (m) => { document.getElementById('err').textContent += 'error: ' + m + '\n'; };
 addEventListener('error', (e) => showErr(e.message || 'could not load ' + (e.target?.src || e.target?.href)), true);
@@ -32,8 +52,9 @@ import { GLTFExtensionsPlugin, DebugTilesPlugin } from '3d-tiles-renderer/plugin
 
 const params = new URLSearchParams(location.search);
 const TILESET = params.get('tileset') || 'out/tileset.json';
-const LRU_MAX_MB = 8192, MB = 1048576;
-const LRU_MB = Math.min(LRU_MAX_MB, Math.max(64, +params.get('lru') || 3072));
+const LRU_MAX_MB = 8192, MB = 1048576, TOUCH = matchMedia('(pointer: coarse)').matches; // phones, tablets
+// iOS kills tabs that hold GBs of GPU textures
+const LRU_MB = Math.min(LRU_MAX_MB, Math.max(64, +params.get('lru') || (TOUCH ? 768 : 3072)));
 // world is Y-up, source is Z-up: tiles.group is rotated -90deg about X, so world = (X, Z, -Y) of source
 const src2w = (p) => new THREE.Vector3(p[0], p[2], -p[1]);
 const w2src = (v) => [v.x, -v.z, v.y];
@@ -91,37 +112,84 @@ function lookAtPivot() {
   camera.updateProjectionMatrix();
   marker.position.copy(pivot); marker.scale.setScalar(Math.max(0.003, r * 0.006));
 }
-let drag = null;
-el.addEventListener('contextmenu', (e) => e.preventDefault());
-el.addEventListener('pointerdown', (e) => { el.setPointerCapture(e.pointerId); drag = { x: e.clientX, y: e.clientY, pan: e.button === 2 || e.button === 1 || e.shiftKey }; });
-el.addEventListener('pointerup', (e) => { drag = null; el.releasePointerCapture(e.pointerId); });
-el.addEventListener('pointermove', (e) => {
-  if (!drag) return;
-  const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
-  if (drag.pan) {
-    const k = (2 * Math.tan((camera.fov * Math.PI) / 360) * camera.position.distanceTo(pivot)) / el.clientHeight;
-    const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
-    const d = right.multiplyScalar(-dx * k).add(up.multiplyScalar(dy * k));
-    camera.position.add(d); pivot.add(d);
-  } else {
-    const off = camera.position.clone().sub(pivot), sph = new THREE.Spherical().setFromVector3(off);
-    sph.theta -= dx * 0.005; sph.phi = Math.min(Math.PI - 0.01, Math.max(0.01, sph.phi - dy * 0.005));
-    camera.position.copy(pivot).add(off.setFromSpherical(sph));
-  }
-  lookAtPivot();
-});
-el.addEventListener('dblclick', (e) => {
+function orbit(dx, dy) {
+  const off = camera.position.clone().sub(pivot), sph = new THREE.Spherical().setFromVector3(off);
+  sph.theta -= dx * 0.005; sph.phi = Math.min(Math.PI - 0.01, Math.max(0.01, sph.phi - dy * 0.005));
+  camera.position.copy(pivot).add(off.setFromSpherical(sph));
+}
+function pan(dx, dy) {
+  const k = (2 * Math.tan((camera.fov * Math.PI) / 360) * camera.position.distanceTo(pivot)) / el.clientHeight;
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0), up = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 1);
+  const d = right.multiplyScalar(-dx * k).add(up.multiplyScalar(dy * k));
+  camera.position.add(d); pivot.add(d);
+}
+// along the ray through ndc, so what is hd away there (else the pivot) ends up f times as far; the pivot follows
+function zoomAt(ndc, f, hd) {
+  const r = camera.position.distanceTo(pivot);
+  raycaster.setFromCamera(ndc, camera);
+  camera.position.addScaledVector(raycaster.ray.direction, (hd ?? r) * (1 - f));
+  pivot.copy(camera.position).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), Math.max(1e-4, r * f));
+}
+function setPivotAt(e) {
   const h = pick(ndcOf(e)); if (!h) return;
   pivot.copy(h.point); marker.visible = true; lookAtPivot();
   clearTimeout(marker._t); marker._t = setTimeout(() => (marker.visible = false), 1500);
+}
+// pointers on the canvas: one drags (orbit; mouse right/middle/shift: pan), two pinch-zoom toward their midpoint and pan.
+// Nothing here stops events: selinf.js and damage.js listen on the same canvas.
+const ptrs = new Map(); let drag = null, pinch = null, tap = null, mouse = true;
+const mid = () => { const [a, b] = ptrs.values(); return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) }; };
+function regrip() { // the fingers changed: carry on from where they are now, so nothing jumps
+  if (ptrs.size < 2) { pinch = null; return; }
+  const m = mid(); drag.multi = true;
+  // pick() has no BVH: once per pinch, then the zoom scales the distance it found
+  m.hd = pinch ? pinch.hd : pick(ndcOf({ clientX: m.x, clientY: m.y }))?.distance ?? camera.position.distanceTo(pivot);
+  pinch = m;
+}
+el.addEventListener('contextmenu', (e) => e.preventDefault());
+el.addEventListener('pointerdown', (e) => {
+  el.setPointerCapture(e.pointerId); mouse = e.pointerType === 'mouse';
+  if (e.isPrimary) ptrs.clear(); // a new gesture: drop fingers whose pointerup got lost
+  ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: mouse });
+  if (ptrs.size === 1) drag = { pan: e.button === 2 || e.button === 1 || e.shiftKey, multi: false };
+  regrip();
 });
+el.addEventListener('pointermove', (e) => {
+  const p = ptrs.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+  p.moved ||= Math.hypot(p.x - p.x0, p.y - p.y0) > 8; // touch slop: a tap leaves the camera alone
+  if (pinch) {
+    const m = mid(), f = pinch.d / m.d;
+    pan(m.x - pinch.x, m.y - pinch.y); zoomAt(ndcOf({ clientX: m.x, clientY: m.y }), f, pinch.hd);
+    m.hd = pinch.hd * f; pinch = m;
+  } else if (!p.moved) return;
+  else if (drag.pan) pan(dx, dy);
+  else orbit(dx, dy);
+  lookAtPivot();
+});
+function lift(e) {
+  const p = ptrs.get(e.pointerId); if (!p) return;
+  ptrs.delete(e.pointerId);
+  // double-tap = dblclick, which iOS doesn't fire reliably: two still one-finger taps within 350 ms and 30 px
+  if (e.type === 'pointerup' && e.pointerType !== 'mouse' && !p.moved && !drag.multi) {
+    const t = performance.now();
+    if (tap && t - tap.t < 350 && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) < 30) { tap = null; setPivotAt(e); }
+    else tap = { t, x: e.clientX, y: e.clientY };
+  }
+  if (!ptrs.size) drag = null;
+  regrip();
+}
+el.addEventListener('pointerup', lift);
+el.addEventListener('pointercancel', lift);
+el.addEventListener('dblclick', (e) => { if (mouse) setPivotAt(e); }); // touch, pen: the double-tap above
 el.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const f = Math.exp(e.deltaY * 0.0015), ndc = ndcOf(e), r = camera.position.distanceTo(pivot), hit = pick(ndc);
-  camera.position.addScaledVector(raycaster.ray.direction, (hit ? hit.distance : r) * (1 - f)); // toward the point under the cursor
-  pivot.copy(camera.position).addScaledVector(camera.getWorldDirection(new THREE.Vector3()), Math.max(1e-4, r * f));
+  const ndc = ndcOf(e);
+  zoomAt(ndc, Math.exp(e.deltaY * 0.0015), pick(ndc)?.distance); // toward the point under the cursor
   lookAtPivot();
 }, { passive: false });
+// iOS page pinch-zoom outside the canvas (HUD, panels). Touch only: desktop Safari's trackpad pinch stays as it was
+if (TOUCH) for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault());
 addEventListener('keydown', (e) => { if (e.target.tagName !== 'INPUT' && e.key.toLowerCase() === 'f') fit(); });
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
@@ -159,7 +227,11 @@ function stats() {
 }
 
 // ---------- HUD ----------
-const statsEl = document.getElementById('stats'), ctl = document.getElementById('ctl');
+const statsEl = document.getElementById('stats'), ctl = document.getElementById('ctl'), hud = document.getElementById('hud'), fold = document.getElementById('fold');
+// small screens (CSS shows #fold): the HUD body folds away, folded at first on phones
+const setFold = (on) => { hud.classList.toggle('min', on); fold.textContent = on ? '\u2630' : '\u00d7'; };
+fold.onclick = () => setFold(!hud.classList.contains('min'));
+setFold(matchMedia('(max-width: 700px), (pointer: coarse) and (max-height: 500px)').matches);
 function addToggle(label, fn) {
   const l = document.createElement('label'), c = document.createElement('input'); c.type = 'checkbox';
   c.onchange = () => fn(c.checked); l.append(c, ' ' + label); ctl.append(l); return c;
@@ -185,7 +257,9 @@ addToggle('bounding boxes', (on) => { debug.displayBoxBounds = on; debug.update(
 addToggle('freeze LOD', (on) => (S.frozen = on));
 const uncapped = addToggle('uncapped fps (GPU-paced)', (on) => setUncapped(on));
 const hint = document.createElement('div'); hint.className = 'hint';
-hint.textContent = 'drag orbit | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit'; ctl.append(hint);
+hint.textContent = TOUCH ? 'drag orbit | pinch zoom | 2-finger pan | double-tap pivot | tap damage'
+  : 'drag orbit | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit';
+ctl.append(hint);
 
 const maxAniso = renderer.capabilities.getMaxAnisotropy(); // grazing views of the deck stay sharp
 tiles.addEventListener('load-model', ({ scene: s }) => s.traverse((o) => {
@@ -204,6 +278,7 @@ function frame() {
   renderer.render(scene, camera);
   if (now - winT < 250) return; // HUD: frames actually rendered in the last window, and its slowest frame
   fps = (frames * 1000) / (now - winT); frameMs = (now - winT) / frames; worstMs = worst; frames = worst = 0; winT = now;
+  if (!statsEl.offsetParent) return; // HUD folded: skip its sliders and the walk over every loaded tile
   const mb = Math.round(tiles.lruCache.maxBytesSize / MB); // slider shows the real cap
   if (document.activeElement !== lru.s && +lru.s.value !== mb) { lru.s.max = Math.max(LRU_MAX_MB, mb); lru.s.value = mb; lru.upd(); }
   if (document.activeElement !== zoom.s) { zoom.s.value = dist2zoom(camera.position.distanceTo(pivot)); zoom.upd(); }
@@ -242,4 +317,5 @@ const ready = new Promise((resolve, reject) => {
 });
 window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl };
 </script>
-<script type="module" src="selinf.js"></script></body></html>
+<script type="module" src="selinf.js"></script>
+<script type="module" src="damage.js"></script></body></html>

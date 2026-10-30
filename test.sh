@@ -4,10 +4,11 @@
 #   ./test.sh               PC: copy this folder's code, build selinf_core (MSVC) and run test_selinf.py there; then swap
 #                           it in for the running server, start selinf.py (GPU), tunnel it to 127.0.0.1:8765, open the viewer
 #   ./test.sh data          PC: copy source/ work/ out/ (the viewer's tiles, lod.py build's inputs) into the PC folder
+#   ./test.sh damage        PC: damage.py (the app's damage + photo crops) -> out\damage there, then a copy in out/ here
 #   ./test.sh public on     publish the PC server on the internet (a Cloudflare quick tunnel over TCP); off | status
 #   ./test.sh stop          stop the PC server and the tunnel
 #   ./test.sh test          Mac: fetch pybind11 + Embree headers (once), build selinf_core, run test_selinf.py
-# In the viewer: alt-click (option-click) the bridge.
+# In the viewer: the inference button, then click the bridge (or alt-click it).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 LOGIN="${LOGIN:-test:test}"
@@ -41,6 +42,16 @@ if [ "${1:-}" = stop ]; then
   ssh lynceus-win "powershell -NoProfile -Command \"$kill_pc\"" || true
   pkill -f "$tunnel" || true
   echo stopped; exit 0
+fi
+
+# damage.py runs where lynceus's damage store and the photos are; deps\python (the build's NuGet CPython, which starts
+# over ssh, unlike the venv's Store Python) with the worker venv's numpy + Pillow. ~100 MB comes back at ~1 MB/s.
+if [ "${1:-}" = damage ]; then
+  scp -q "$here/damage.py" lynceus-win:C:/Users/rokob/lod-lite-selinf/damage.py
+  ssh lynceus-win "cd /d C:\\Users\\rokob\\lod-lite-selinf && set PYTHONPATH=C:\\dev\\lynceus\\apps\\worker\\.venv\\Lib\\site-packages&& deps\\python\\tools\\python.exe -u damage.py"
+  rm -rf "$here/out/damage"; mkdir -p "$here/out"
+  ssh lynceus-win "C:\\Windows\\System32\\tar.exe -cf - -C C:/Users/rokob/lod-lite-selinf/out damage" | tar -xf - -C "$here/out"
+  echo "out/damage: $(du -sh "$here/out/damage" | cut -f1)"; exit
 fi
 
 # ---- PC: C:\Users\rokob\lod-lite-selinf\ holds the served code (its top-level files), the data (source, work, out),

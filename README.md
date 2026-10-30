@@ -1,8 +1,9 @@
 # lod-lite + selective inference
 
 Streaming LOD viewer for a RealityScan survey (built on Petrinja), made from the existing OBJ parts and
-diffuse atlas with our own decimation and texture re-bake. RealityScan is not run. Alt-click (option-click)
-the bridge and the PC runs the damage models only on the photos around the click; the damage it finds is
+diffuse atlas with our own decimation and texture re-bake. RealityScan is not run. The app's damage is drawn on
+it: click a damage for its crack length or area and its best photos. Press "inference" and click the bridge (or
+alt-click it) and the PC runs the damage models only on the photos around the click; the damage it finds is
 drawn in the viewer.
 
 ```
@@ -25,8 +26,30 @@ The build is resumable, and takes about 30 min and up to ~12 GB RAM for the 50 M
 
 `viewer.html` is three.js + 3d-tiles-renderer from jsDelivr (needs internet), with no build step.
 Controls: drag to orbit, right/shift-drag to pan, wheel to zoom to the cursor, double-click to set the
-pivot, `F` to fit. URL params: `?tileset=`, `?lru=<MB>`, `?uncapped` (render as fast as the GPU finishes frames),
-`?selinf=<url>` (another inference server).
+pivot, `F` to fit; on a phone or tablet: drag to orbit, pinch to zoom, two-finger drag to pan, double-tap to set the
+pivot, ☰ for the menu. URL params: `?tileset=`, `?lru=<MB>` (default 3072, 768 on touch devices), `?uncapped`
+(render as fast as the GPU finishes frames), `?selinf=<url>` (another inference server), `?damage=<dir>` (default
+`out/damage/`).
+
+## Damage (the app's, from lynceus)
+
+`damage.py` turns the lynceus app's damage store (the project's `content/`: points.bin, the hidden-points bitset,
+crack_lengths.json, points_sources.bin, the photos) into `out/damage/`, static files the viewer's `damage.js` loads:
+
+- `damage.bin`: the points the app shows (uint16 xyz in the scene's box, 6 B/point, ~10 MB), grouped by class, then damage.
+- `damage.json`: per class its colour and totals; per damage (= the app's cluster) its point range, box, crack length
+  (Crack: lynceus's own cached skeleton length) or area (point count × voxel², as the app counts it), and its photos.
+- `img/<damage>_<k>.jpg`: crops of up to 3 photos per damage, chosen so they overlap least: the photo whose mask
+  found most of the damage's points (the app's ranking), then while it adds ≥ 10 % of the points, the one that sees
+  the most points not yet covered (per-point provenance, points_sources.bin). Each crop carries the damage's box.
+
+```
+./test.sh damage        # PC: run damage.py next to the data (~20 s), copy out\damage back into out/ (~80 MB)
+```
+
+In the viewer: the damage section of the menu has an opacity slider and one toggle per class (with its count and
+total). Click or tap a damage: a side panel (a bottom sheet on a phone) shows its class, length or area and photos;
+a photo opens full screen (← → or swipe for the next one, Esc closes).
 
 ## Selective inference (on the PC)
 

@@ -181,7 +181,7 @@ def server(core, infer, classes, root, port=8765, auth=None):
             if path == "/health":
                 return self.reply(200, json.dumps({"ok": True, "photos": len(core.names), "classes": classes}).encode())
             path = "/viewer.html" if path == "/" else path
-            if path in ("/viewer.html", "/selinf.js") or path.startswith("/out/") and os.path.isfile(self.translate_path(path)):
+            if path in ("/viewer.html", "/selinf.js", "/damage.js") or path.startswith("/out/") and os.path.isfile(self.translate_path(path)):
                 self.path = path   # nothing else under root: source/, work/, job/ and the code stay private
                 return super().do_GET()
             self.send_error(404)

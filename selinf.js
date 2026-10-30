@@ -1,13 +1,13 @@
-// Selective inference: alt-click the bridge -> the PC runs the damage models only on the photos
-// around the click (selinf.py, which also serves this page) and the result is drawn here.
-// ?selinf=<url> overrides the server (default: the one this page came from).
+// Selective inference: alt-click the bridge, or press the "inference" button and then click / tap it -> the PC runs
+// the damage models only on the photos around the click (selinf.py, which also serves this page) and the result is
+// drawn here. ?selinf=<url> overrides the server (default: the one this page came from).
 import * as THREE from 'three';
 
 const lod = window.lod;
 const API = new URLSearchParams(location.search).get('selinf') ?? '';
 const COLOR = { Crack: '#FF2D2D', ExposedRebars: '#FF8A00', Rust: '#FF2DAF', Spalling: '#FFD60A',
   Wetspot: '#00E5FF', Cavity: '#7CFF00', Efflorescence: '#C42DFF' }; // = the product palette (drawings/colors.py)
-const IDLE = 'selective inference: alt-click the bridge';
+const IDLE = 'selective inference: the inference button, then click the bridge (or alt-click it)';
 
 const root = new THREE.Group();
 root.rotation.x = -Math.PI / 2; // source (bake) frame, like tiles.group
@@ -50,17 +50,39 @@ function cloud(group, byClass) {
   return n;
 }
 
-let busy = false, down = [0, 0];
-lod.el.addEventListener('pointerdown', (e) => (down = [e.clientX, e.clientY]));
+// the button arms one click (no alt key on a phone); damage.js skips that tap while lod.inferArmed is set
+const css = document.createElement('style');
+css.textContent = '#infer{position:fixed;left:calc(8px + env(safe-area-inset-left));bottom:calc(8px + env(safe-area-inset-bottom));' +
+  'min-height:40px;padding:0 14px;font:12px ui-monospace,Menlo,monospace;color:#d8d8d8;background:rgba(0,0,0,.6);' +
+  'border:1px solid #555;border-radius:20px;cursor:pointer;touch-action:manipulation}' +
+  '#infer.on{background:#2a5bd7;border-color:#6d95ff;color:#fff}#infer:disabled{cursor:default;opacity:.85}' +
+  '@media (max-width:700px){#infer{left:auto;bottom:auto;right:calc(8px + env(safe-area-inset-right));top:calc(8px + env(safe-area-inset-top))}}';
+const btn = document.createElement('button'), TAP = matchMedia('(pointer: coarse)').matches ? 'tap' : 'click';
+btn.id = 'infer';
+document.head.append(css); document.body.append(btn);
+function arm(on) {
+  lod.inferArmed = on; btn.classList.toggle('on', on);
+  btn.textContent = on ? `${TAP} the bridge (cancel)` : 'inference';
+  lod.el.style.cursor = on ? 'crosshair' : '';
+}
+arm(false);
+btn.onclick = () => { if (!busy) arm(!lod.inferArmed); };
+
+let busy = false, down = [0, 0], slop = 4;
+lod.el.addEventListener('pointerdown', (e) => { down = [e.clientX, e.clientY]; slop = e.pointerType === 'touch' ? 10 : 4; });
 lod.el.addEventListener('click', async (e) => {
-  if (!e.altKey || busy || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 4) return;
+  if (!(e.altKey || lod.inferArmed) || busy || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > slop) return;
   const hit = lod.pick(lod.ndcOf(e));
-  if (!hit) return;
+  if (!hit) return; // a miss stays armed
+  arm(false);
   const o = lod.w2src(lod.camera.position), p = lod.w2src(hit.point);
-  busy = true;
+  busy = true; btn.disabled = true;
   seed.position.fromArray(p); seed.visible = true;
   const t0 = performance.now();
-  const tick = setInterval(() => (status.textContent = `running... ${((performance.now() - t0) / 1000).toFixed(0)} s`), 250);
+  const tick = setInterval(() => {
+    const s = ((performance.now() - t0) / 1000).toFixed(0);
+    status.textContent = `running... ${s} s`; btn.textContent = `running ${s} s`;
+  }, 250);
   try {
     // text/plain body: no CORS preflight. Answer: uint32 header length, JSON header, float32 xyz per layer
     const buf = await (await fetch(API + '/click', { method: 'POST', body: JSON.stringify({ origin: o, direction: p.map((v, i) => v - o[i]) }) })).arrayBuffer();
@@ -76,12 +98,13 @@ lod.el.addEventListener('click', async (e) => {
       `${s.total} s (models ${s.models} s, bake ${s.bake} s)\n` +
       `points: selective ${ns.toLocaleString()} | full run ${nf.toLocaleString()}`;
   } catch (err) {
-    status.textContent = `failed: ${err.message}\n(is experiments/selective_inference/test.sh running?)`;
+    status.textContent = `failed: ${err.message}\n(is the PC server running? ./test.sh)`;
   } finally {
-    clearInterval(tick); busy = false;
+    clearInterval(tick); busy = false; btn.disabled = false; arm(false);
   }
 });
 addEventListener('keydown', (e) => {
   if (e.key !== 'Escape' || busy) return;
+  if (lod.inferArmed) return arm(false);
   cloud(sel); cloud(full); seed.visible = false; status.textContent = IDLE;
 });
