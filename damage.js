@@ -1,14 +1,15 @@
-// Damage overlay: the damage point clouds of damage.py (out/damage/) drawn on the bridge. The dock tool "Slojevi" opens the
-// layers popover (per-class toggles, opacity); tap a damage -> the inspector (measure, photo); tap the photo -> a viewer.
-// ?damage=<dir> overrides the data dir (default out/damage/, relative to this page). The look is lynceus "Ui Inspect": the
-// colours, fonts and sizes are viewer.html's :root tokens; the dock tool and the hint chip come from its lod.ui.
+// Damage overlay: the app's damage (damage.py's out/damage/) and the finds of "Prepoznaj oštećenja" (selinf.py saves them
+// in out/found/) drawn on the bridge. The dock tool "Slojevi" opens the layers popover (per-class toggles, opacity); tap a
+// damage -> the inspector (measure, photo; a find can be deleted); tap the photo -> a viewer. ?damage=<dir>, ?found=<dir>
+// override the data dirs (relative to this page), ?selinf=<url> the server (as selinf.js). The look is lynceus "Ui Inspect":
+// the colours, fonts and sizes are viewer.html's :root tokens; the dock tool and the hint chip come from its lod.ui.
 import * as THREE from 'three';
 
-const lod = window.lod, ui = lod.ui;
-let BASE = new URLSearchParams(location.search).get('damage') ?? 'out/damage/';
-if (!BASE.endsWith('/')) BASE += '/';
-const jsonP = fetch(BASE + 'damage.json', { cache: 'no-cache' }), binP = fetch(BASE + 'damage.bin', { cache: 'no-cache' });
-binP.catch(() => {}); // awaited only when the JSON is there
+const lod = window.lod, ui = lod.ui, qs = new URLSearchParams(location.search), dir = (d) => (d.endsWith('/') ? d : d + '/');
+const BASE = dir(qs.get('damage') ?? 'out/damage/'), FOUND = dir(qs.get('found') ?? 'out/found/'), API = qs.get('selinf') ?? '';
+const get = (url) => fetch(url, { cache: 'no-cache' });
+const jsonP = get(BASE + 'damage.json'), binP = get(BASE + 'damage.bin'), foundP = get(FOUND + 'found.json');
+binP.catch(() => {}); foundP.catch(() => {}); // awaited later (the bin only when the JSON is there)
 
 const css = document.createElement('style');
 css.textContent = `
@@ -45,6 +46,7 @@ css.textContent = `
 .dm-tech{border-top:1px solid var(--line);font-size:13px;color:var(--t-low)}.dm-tech summary{line-height:36px;list-style:none;cursor:pointer}
 .dm-tech summary::-webkit-details-marker{display:none}.dm-tech svg{vertical-align:-2px;margin-right:8px}.dm-tech:not([open]) svg{transform:rotate(-90deg)}
 .dm-dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:12px}.dm-dl>:nth-child(even){font-family:var(--font-mono);color:var(--t);overflow-wrap:anywhere}
+.dm-del{height:var(--h-btn);border-radius:var(--r-sm);background:var(--ink2);font-weight:600}.dm-del:disabled{color:var(--t-low);cursor:default} /* secondary: not blue, not red */
 .dm-view{position:fixed;inset:0;z-index:1000;background:var(--ink0);color:var(--t);touch-action:none;-webkit-user-select:none;user-select:none;--fs:102px;
  --dmw:calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));--dmh:calc(100dvh - 104px - var(--fs) - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
 .dm-st{position:absolute;inset:calc(72px + env(safe-area-inset-top)) 0 calc(32px + var(--fs) + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:center}
@@ -63,8 +65,8 @@ css.textContent = `
 .dm-fs img{display:block;width:100%;height:100%;object-fit:cover}.dm-fs .num{padding:0 4px;font-size:12px;color:var(--t-low)}
 @media (max-width:700px){.dm-insp{top:auto;left:calc(16px + env(safe-area-inset-left));bottom:calc(28px + var(--h-dock) + env(safe-area-inset-bottom));
  width:auto;max-height:50dvh}.dm-head h2{font-size:18px;line-height:22px}.dm-view{--fs:78px}.dm-fs button{width:80px;height:56px}}
-@media (pointer:coarse){.dm-row{height:44px}.dm-px,.dm-x,.dm-vb{width:44px;height:44px}.dm-sl{height:44px}.dm-tech summary{line-height:44px}}
-@media (hover:hover){.dm-px:hover,.dm-eye:hover,.dm-vb:hover{background:var(--ink2)}.dm-x:hover{background:var(--ink4)}}`; // reduced motion: viewer.html's global rule
+@media (pointer:coarse){.dm-row{height:44px}.dm-px,.dm-x,.dm-vb{width:44px;height:44px}.dm-sl{height:44px}.dm-tech summary{line-height:44px}.dm-del{height:44px}}
+@media (hover:hover){.dm-px:hover,.dm-eye:hover,.dm-vb:hover{background:var(--ink2)}.dm-x:hover,.dm-del:hover:enabled{background:var(--ink4)}}`; // reduced motion: viewer.html's global rule
 document.head.append(css);
 
 const h = (tag, cls = '', text = '') => Object.assign(document.createElement(tag), { className: cls, textContent: text });
@@ -74,28 +76,30 @@ const XP = '<path d="M6 6l12 12M18 6L6 18"/>', EYE = '<path d="M2 12s3.5-7 10-7 
 const btn = (cls, label, html = '') => { const b = Object.assign(h('button', cls), { type: 'button', innerHTML: html }); b.setAttribute('aria-label', label); return b; };
 const swatch = (color) => { const s = h('span', 'dm-sw'); s.style.setProperty('--c', color); return s; };
 
-// Croatian names (in the palette order, the legend's) and hr-HR numbers: "1,84 m", "0,12 m²", below 1 dm² "22 cm²", "80 %"
-const HR = { Crack: 'Pukotina', ExposedRebars: 'Ogoljela armatura', Rust: 'Korozija', Spalling: 'Odlamanje betona',
-  Wetspot: 'Vlažna mrlja', Cavity: 'Šupljina', Efflorescence: 'Iscvjetavanje' };
-const ORDER = Object.keys(HR), hr = (c) => HR[c.name] ?? c.name;
+// the classes in the legend's order: Croatian name, colour (damage.json's wins; = the product palette, drawings/colors.py).
+// hr-HR numbers: "1,84 m", "0,12 m²", below 1 dm² "22 cm²", "80 %"
+const CL = { Crack: ['Pukotina', '#FF2D2D'], ExposedRebars: ['Ogoljela armatura', '#FF8A00'], Rust: ['Korozija', '#FF2DAF'],
+  Spalling: ['Odlamanje betona', '#FFD60A'], Wetspot: ['Vlažna mrlja', '#00E5FF'], Cavity: ['Šupljina', '#7CFF00'], Efflorescence: ['Iscvjetavanje', '#C42DFF'] };
+const ORDER = Object.keys(CL), hr = (c) => CL[c.name]?.[0] ?? c.name;
 const nf = (o) => new Intl.NumberFormat('hr-HR', o).format, n0 = nf({ maximumFractionDigits: 0 }), pct = nf({ style: 'percent' });
 const n2 = nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const fmt = (v, c) => (v == null ? '—' : c.measure === 'length' ? n2(v) + ' m' : v < 0.01 ? n0(v * 1e4) + ' cm²' : n2(v) + ' m²');
 const fotografij = (n) => `${n0(n)} fotografij${n % 10 > 1 && n % 10 < 5 && (n % 100 < 12 || n % 100 > 14) ? 'e' : 'a'}`; // 2-4, 22-24: -e
 
-const status = h('pre', '', 'damage: loading...'); // the dev HUD's English one-liner
+const status = h('pre'), st = { damage: 'loading...' }; // the dev HUD's English lines
 status.style.cssText = 'margin-top:8px;border-top:1px solid var(--line);padding-top:8px'; lod.ctl.append(status);
-const unhint = ui.hint('Učitavanje oštećenja…'); // clears only while it still shows this hint
-const say = (text, dev, ms) => { ui.hint(text, ms); msg.textContent = text; status.textContent = dev; };
+const dev = (k, s) => { st[k] = s; status.textContent = `damage  ${st.damage}\nfound   ${st.found}`; };
+const LOADING = 'Učitavanje oštećenja…', unhint = ui.hint(LOADING); // clears only while it still shows this hint
+dev('found', 'loading...');
+const say = (text, k, d, ms) => { ui.hint(text, ms); msg.textContent = text; dev(k, d); };
+const fail = (k) => (e) => say(`Oštećenja se nisu učitala: ${e.message}`, k, 'failed: ' + e.message, 10000);
+const NONE = 'Oštećenja nisu dostupna (pokrenite damage.py)';
 
-// the GPU dequantises: q maps the unit cube (normalized uint16) onto the data box, inside the Z-up source frame
-const root = new THREE.Group();
-root.rotation.x = -Math.PI / 2;
-const q = new THREE.Group();
-root.add(q); lod.scene.add(root);
+const root = new THREE.Group(); // the Z-up source frame
+root.rotation.x = -Math.PI / 2; lod.scene.add(root);
 
-// Points size in world units (P[1][1] = 1/tan(fov/2), mvPosition includes q's scale) so cracks look solid up close, with a
-// floor in device px so far ones don't vanish. The depth pull (1 % of view depth) keeps coarser LOD tiles from hiding them.
+// Points size in world units (P[1][1] = 1/tan(fov/2), mvPosition includes the app points' box scale) so cracks look solid up
+// close, with a floor in device px so far ones don't vanish. The depth pull (1 % of view depth) keeps coarser LOD tiles from hiding them.
 function patch(s) {
   s.vertexShader = s.vertexShader
     .replace('gl_PointSize *= ( scale / - mvPosition.z );', 'gl_PointSize = max( MIN_PX, size * projectionMatrix[ 1 ][ 1 ] * scale / - mvPosition.z );')
@@ -110,13 +114,33 @@ function mat(color, size, minPx, opts) {
 }
 const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); // transparent: drawn after (over) the class points
 
-let J = null, Q = null, B, S, K, on = [], pts = [], opacity = 0.8, sel = -1, selPts = null;
+// C: the classes ({name, color, voxel, measure, items + total: the app's, g: its group, mat}); app, finds: the two kinds of
+// damage ({c, n, m, b, p: [[photo name, box]], img, title, tid}; the app's: s = its run in Q, a find's: xyz = its floats)
+let J = null, Q = null, B, S, K, finds = [], opacity = 0.8, sel = null, selPts = null;
+const C = [], app = [], Z = [0, 0, 0], U = [1, 1, 1];
 const unitBox = (b) => new THREE.Box3().setFromArray(b.map((v, i) => (v - B[i % 3]) / S[i % 3]));
+function points(arr, m, box, quant) { // quant: the app's normalized uint16 in the data box (the GPU dequantises), else floats
+  const g = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(arr, 3, quant));
+  g.boundingSphere = box.getBoundingSphere(new THREE.Sphere()); // no scan of 1.7 M points
+  const p = new THREE.Points(g, m);
+  if (quant) { p.position.fromArray(B); p.scale.fromArray(S); }
+  return p;
+}
+const itemPts = (it, m) => (it.xyz ? points(it.xyz, m, new THREE.Box3().setFromArray(it.b).expandByScalar(0.001), false) // b: to 1 mm
+  : points(new Uint16Array(Q.buffer, it.s * 6, it.n * 3), m, unitBox(it.b), true)); // zero-copy views
 
 // ---------- "Slojevi": the layers popover above its dock tool ----------
 const pop = h('div', 'dm dm-pop'), ph = h('div', 'dm-ph1'), px = btn('dm-px', 'Zatvori slojeve', svg(XP));
-const msg = h('div', 'dm-msg', 'Učitavanje oštećenja…'), rows = h('div', 'dm-rows'), ar = h('i', 'dm-ar');
-ph.append(h('span', 'cap', 'Klase oštećenja'), px); pop.append(ph, msg, rows, ar); document.body.append(pop);
+const msg = h('div', 'dm-msg', LOADING), rows = h('div', 'dm-rows'), ar = h('i', 'dm-ar');
+const lab = h('div', 'dm-ol'), val = h('span', 'num'), sl = h('input', 'dm-sl');
+Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
+sl.setAttribute('aria-label', 'Neprozirnost oštećenja');
+sl.oninput = () => {
+  opacity = sl.value / 100; val.textContent = pct(opacity); sl.style.setProperty('--p', opacity); // --p: the blue fill
+  for (const c of C) c.mat.opacity = opacity;
+};
+sl.oninput(); lab.append('Neprozirnost oštećenja', val);
+ph.append(h('span', 'cap', 'Klase oštećenja'), px); pop.append(ph, msg, rows, lab, sl, ar); document.body.append(pop);
 pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Slojevi');
 const tool = ui.tool({ label: 'Slojevi', order: 10, onClick: () => layers(pop.style.display === 'none'),
   icon: '<path d="M10 3.5l7.5 4.2-7.5 4.2-7.5-4.2z"/><path d="M2.5 12l7.5 4.2 7.5-4.2"/>' }); // layers; lod.ui wraps the <svg>
@@ -134,60 +158,111 @@ function place() { // centred on the tool, clamped to the screen; the arrow keep
 }
 addEventListener('resize', () => pop.style.display || place());
 
-function layersUI() {
-  msg.textContent = '';
-  const rank = (ci) => { const i = ORDER.indexOf(J.classes[ci].name); return i < 0 ? ORDER.length : i; };
-  for (const ci of J.classes.map((_, i) => i).sort((a, b) => rank(a) - rank(b))) {
-    const c = J.classes[ci], row = h('div', 'dm-row'), eye = btn('dm-eye', ''); // the whole row toggles; the eye is its button
-    row.append(swatch(c.color), h('span', 'dm-nm', hr(c)), h('span', 'num dm-ct', n0(c.items)), h('span', 'num dm-tot', fmt(c.total, c)), eye);
-    const show = () => { // hidden: hollow swatch, --t-off text, eye-off
-      row.classList.toggle('off', !on[ci]); eye.innerHTML = svg(on[ci] ? EYE : EYE + '<path d="M3 3l18 18"/>');
-      eye.setAttribute('aria-label', `${on[ci] ? 'Sakrij' : 'Prikaži'} klasu ${hr(c)}`);
-    };
-    row.onclick = () => {
-      on[ci] = !on[ci]; show();
-      if (pts[ci]) pts[ci].visible = on[ci];
-      if (!on[ci] && sel >= 0 && J.items[sel].c === ci) select(-1);
-    };
-    show(); rows.append(row);
-  }
-  const lab = h('div', 'dm-ol'), val = h('span', 'num'), sl = h('input', 'dm-sl');
-  Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
-  sl.setAttribute('aria-label', 'Neprozirnost oštećenja');
-  sl.oninput = () => {
-    opacity = sl.value / 100; val.textContent = pct(opacity); sl.style.setProperty('--p', opacity); // --p: the blue fill
-    for (const p of pts) if (p) p.material.opacity = opacity;
+function klass(name, o) { // the class called name, made on first use: the palette's defaults, then o (damage.json's / a find's)
+  let c = C.find((x) => x.name === name);
+  if (c) return c;
+  const crack = name === 'Crack', r = h('div', 'dm-row'), eye = btn('dm-eye', ''); // the whole row toggles; the eye is its button
+  c = { name, color: CL[name]?.[1] ?? '#828A92', voxel: crack ? 0.005 : 0.01, measure: crack ? 'length' : 'area', items: 0, total: 0, ...o, g: new THREE.Group(), row: r };
+  c.mat = mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { transparent: true, opacity, depthWrite: false }); // both kinds share it
+  r.append(swatch(c.color), h('span', 'dm-nm', hr(c)), (c.ct = h('span', 'num dm-ct')), (c.tot = h('span', 'num dm-tot')), eye);
+  c.show = (v) => { // hidden: both kinds, hollow swatch, --t-off text, eye-off
+    c.on = c.g.visible = v; r.classList.toggle('off', !v); eye.innerHTML = svg(v ? EYE : EYE + '<path d="M3 3l18 18"/>');
+    eye.setAttribute('aria-label', `${v ? 'Sakrij' : 'Prikaži'} klasu ${hr(c)}`);
+    if (!v && sel?.c === c) select(null);
   };
-  sl.oninput(); lab.append('Neprozirnost oštećenja', val); pop.append(lab, sl);
+  r.onclick = () => c.show(!c.on);
+  c.show(true); root.add(c.g); C.push(c);
+  const rank = (x) => (ORDER.includes(x.name) ? ORDER.indexOf(x.name) : ORDER.length);
+  rows.replaceChildren(...[...C].sort((a, b) => rank(a) - rank(b)).map((x) => x.row)); tally();
+  return c;
+}
+function tally() { // counts and totals: the app's (damage.json) + the finds'
+  for (const c of C) {
+    let n = c.items, t = n ? c.total : null; // no damage, or none measured: "—"
+    for (const f of finds) if (f.c === c) { n++; if (f.m != null) t = (t ?? 0) + f.m; }
+    c.ct.textContent = n0(n); c.tot.textContent = fmt(t, c);
+  }
+  if (finds.length && msg.textContent === NONE) msg.textContent = '';
 }
 
-async function load() {
-  const r = await jsonP;
-  if (r.status === 404) return say('Oštećenja nisu dostupna (pokrenite damage.py)', 'damage: no data (run damage.py)', 8000);
-  if (!r.ok) throw new Error(`damage.json: HTTP ${r.status}`);
-  J = await r.json();
-  B = J.box.slice(0, 3); S = B.map((v, i) => Math.max(J.box[i + 3] - v, 1e-6)); K = S.map((s) => s / 65535);
-  on = J.classes.map(() => true);
-  layersUI();
-  status.textContent = `damage: loading ${J.points.toLocaleString()} points...`;
+// ---------- loading: damage.json + .bin, found.json + a .bin per find; either may be missing ----------
+async function loadJson() { // its classes, then the palette's (also without it)
+  try {
+    const r = await jsonP;
+    if (r.status === 404) return dev('damage', 'no data (run damage.py)'), false;
+    if (!r.ok) throw new Error(`damage.json: HTTP ${r.status}`);
+    J = await r.json();
+    for (const c of J.classes) klass(c.name, c);
+    return true;
+  } finally { for (const n of ORDER) klass(n); }
+}
+async function loadBin() {
+  dev('damage', `loading ${J.points.toLocaleString()} points...`);
   const br = await binP;
   if (!br.ok) throw new Error(`damage.bin: HTTP ${br.status}`);
   const buf = await br.arrayBuffer();
   if (buf.byteLength !== J.points * 6) throw new Error(`damage.bin: ${buf.byteLength} B, expected ${J.points * 6}`);
   Q = new Uint16Array(buf);
-  q.position.fromArray(B); q.scale.fromArray(S);
-  const cube = new THREE.Sphere(new THREE.Vector3(0.5, 0.5, 0.5), Math.sqrt(3) / 2); // no 1.7 M-point scan
-  J.classes.forEach((c, ci) => {
-    if (!c.count) return;
-    const g = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Uint16Array(buf, c.start * 6, c.count * 3), 3, true));
-    g.boundingSphere = cube.clone();
-    const p = new THREE.Points(g, mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { transparent: true, opacity, depthWrite: false }));
-    p.visible = on[ci]; q.add(p); pts[ci] = p;
-  });
-  status.textContent = `damage  ${J.items.length.toLocaleString()} items · ${(J.points / 1e6).toFixed(2)} M points`;
-  unhint();
+  B = J.box.slice(0, 3); S = B.map((v, i) => Math.max(J.box[i + 3] - v, 1e-6)); K = S.map((s) => s / 65535);
+  for (const jc of J.classes) if (jc.count) klass(jc.name).g.add(points(new Uint16Array(buf, jc.start * 6, jc.count * 3), klass(jc.name).mat, unitBox(J.box), true));
+  J.items.forEach((it, i) => app.push({ ...it, c: klass(J.classes[it.c].name), p: it.p.map(([k, ...r]) => [J.photos[k], ...r]),
+    img: `${BASE}img/${i}_`, title: String(it.id), tid: `C-${it.id}` }));
+  dev('damage', `${J.items.length.toLocaleString()} items · ${(J.points / 1e6).toFixed(2)} M points`);
 }
-load().catch((e) => say(`Oštećenja se nisu učitala: ${e.message}`, 'damage: failed: ' + e.message, 10000));
+const classes = loadJson();
+const appDone = classes.then((ok) => ok && loadBin()).catch(fail('damage'));
+
+async function loadFind(f) {
+  const r = await get(`${FOUND}${f.id}.bin`);
+  if (!r.ok) throw new Error(`${f.id}.bin: HTTP ${r.status}`);
+  const buf = await r.arrayBuffer();
+  if (buf.byteLength !== f.n * 12) throw new Error(`${f.id}.bin: ${buf.byteLength} B, expected ${f.n * 12}`);
+  const id = f.id.toUpperCase(), it = { ...f, xyz: new Float32Array(buf), c: klass(f.class, { voxel: f.voxel, measure: f.measure }),
+    img: `${FOUND}img/${f.id}_`, title: id, tid: id };
+  it.pts = itemPts(it, it.c.mat);
+  return it;
+}
+function drop(gone) { // finds no longer in the store
+  for (const f of gone) { f.c.g.remove(f.pts); f.pts.geometry.dispose(); if (sel === f) select(null); }
+  finds = finds.filter((f) => !gone.includes(f)); tally();
+}
+const key = (f) => `${f.id} ${f.time}`; // ids are not reused; a wiped store could
+async function sync(rp) { // found.json is the truth: keep the loaded finds, load the new ones, drop the rest
+  await classes.catch(() => {});
+  const r = await (rp ?? get(FOUND + 'found.json'));
+  if (!r.ok && r.status !== 404) throw new Error(`found.json: HTTP ${r.status}`); // 404: no finds yet
+  const list = r.ok ? (await r.json()).items : [], old = new Map(finds.map((f) => [key(f), f])), errs = [];
+  const now = (await Promise.all(list.map((f) => old.get(key(f)) ?? loadFind(f).catch((e) => void errs.push(e.message))))).filter(Boolean);
+  drop(finds.filter((f) => !now.includes(f)));
+  for (const f of now) if (!f.pts.parent) f.c.g.add(f.pts);
+  finds = now; tally(); dev('found', `${finds.length} items`);
+  if (errs.length) throw new Error(errs.join(', '));
+}
+let queue = Promise.resolve();
+const syncFound = (rp) => (queue = queue.then(() => sync(rp)).catch(fail('found'))); // one at a time
+Promise.all([classes.catch(() => true), appDone, syncFound(foundP)]).then(([ok]) => {
+  if (msg.textContent === LOADING) msg.textContent = '';
+  if (ok || finds.length) unhint(); else say(NONE, 'damage', 'no data (run damage.py)', 8000);
+});
+
+// selinf.js saved a find (and maybe replaced older ones of it): show it and open it
+addEventListener('lod-found', (e) => {
+  const { found, replaced = [] } = e.detail || {};
+  drop(finds.filter((f) => replaced.includes(f.id)));
+  syncFound().then(() => {
+    const f = found && finds.find((x) => x.id === found.id);
+    if (f) { f.c.on || f.c.show(true); select(f); }
+  });
+});
+async function del(f, b) {
+  if (!confirm('Obrisati ovo oštećenje?')) return;
+  b.disabled = true;
+  try { // text/plain body: no CORS preflight
+    const r = await fetch(API + '/found/delete', { method: 'POST', body: JSON.stringify({ id: f.id }) }).catch(() => { throw new Error('server ne odgovara'); });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+    drop([f]); await syncFound(); // drop: closes the inspector
+  } catch (e) { b.disabled = false; ui.hint(`Brisanje nije uspjelo: ${e.message}`, 8000); }
+}
 
 // ---------- tap to select ----------
 const active = new Set(), caster = new THREE.Raycaster(), sray = new THREE.Ray(), ibox = new THREE.Box3(), at = new THREE.Vector3();
@@ -199,11 +274,11 @@ lod.el.addEventListener('pointerdown', (e) => {
   tap = active.size === 1 && e.button === 0 && !e.altKey ? { id: e.pointerId, x: e.clientX, y: e.clientY, t: performance.now() } : null;
 });
 for (const ev of ['pointerup', 'pointercancel']) addEventListener(ev, (e) => active.delete(e.pointerId), true);
-const missed = () => { clearTimeout(miss); miss = setTimeout(() => select(-1), 350); };
+const missed = () => { clearTimeout(miss); miss = setTimeout(() => select(null), 350); };
 lod.el.addEventListener('pointerup', (e) => {
   const d = tap;
   tap = null;
-  if (!d || d.id !== e.pointerId || e.altKey || lod.inferArmed || !Q) return; // armed: this tap belongs to selinf.js
+  if (!d || d.id !== e.pointerId || e.altKey || lod.inferArmed || !(app.length || finds.length)) return; // armed: selinf.js's tap
   const mouse = e.pointerType === 'mouse';
   if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= (mouse ? 5 : 10) || performance.now() - d.t >= 500) return;
   const ndc = lod.ndcOf(e), hit = lod.pick(ndc);
@@ -215,37 +290,35 @@ lod.el.addEventListener('pointerup', (e) => {
   sray.origin.fromArray(o); sray.direction.fromArray(dir);
   const k = (2 * Math.tan((lod.camera.fov * Math.PI) / 360)) / lod.el.clientHeight; // px size / depth
   const R = mouse ? 8 : 16, tmax = hit.distance * 1.02 + 0.02; // a fingertip is less precise than a cursor
-  let best = -1, bs = R * R;
-  J.items.forEach((it, i) => {
-    if (!on[it.c]) return;
+  let best = null, bs = R * R;
+  for (const it of app.concat(finds)) {
+    if (!it.c.on) continue;
     ibox.setFromArray(it.b).expandByScalar(R * k * tmax);
-    if (!ibox.containsPoint(sray.origin) && !(sray.intersectBox(ibox, at) && at.distanceTo(sray.origin) <= tmax)) return;
-    for (let j = it.s * 3, end = (it.s + it.n) * 3; j < end; j += 3) {
-      const x = B[0] + Q[j] * K[0] - o[0], y = B[1] + Q[j + 1] * K[1] - o[1], z = B[2] + Q[j + 2] * K[2] - o[2];
+    if (!ibox.containsPoint(sray.origin) && !(sray.intersectBox(ibox, at) && at.distanceTo(sray.origin) <= tmax)) continue;
+    const [A, j0, b0, s0] = it.xyz ? [it.xyz, 0, Z, U] : [Q, it.s * 3, B, K]; // point j = b0 + A[j] * s0: a find's floats, the app's run
+    for (let j = j0, end = j0 + it.n * 3; j < end; j += 3) {
+      const x = b0[0] + A[j] * s0[0] - o[0], y = b0[1] + A[j + 1] * s0[1] - o[1], z = b0[2] + A[j + 2] * s0[2] - o[2];
       const t = x * dir[0] + y * dir[1] + z * dir[2];
       if (t <= 0 || t > tmax) continue;
       const s2 = (x * x + y * y + z * z - t * t) / (k * k * t * t); // squared screen distance, px
-      if (s2 < bs) { bs = s2; best = i; }
+      if (s2 < bs) { bs = s2; best = it; }
     }
-  });
-  if (best < 0) return missed();
+  }
+  if (!best) return missed();
   select(best);
 });
 
-function select(i) {
-  if (i === sel) return; // e.g. the double-click/tap that sets the pivot: keep the panel and its scroll
-  if (selPts) { q.remove(selPts); selPts.geometry.dispose(); selPts = null; }
-  sel = i;
+function select(it) {
+  if (it === sel) return; // e.g. the double-click/tap that sets the pivot: keep the panel and its scroll
+  if (selPts) { root.remove(selPts); selPts.geometry.dispose(); selPts = null; }
+  sel = it;
   closeView();
-  if (i < 0) return void (panel.style.display = 'none');
-  const it = J.items[i], c = J.classes[it.c];
-  const g = new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Uint16Array(Q.buffer, it.s * 6, it.n * 3), 3, true));
-  g.boundingSphere = unitBox(it.b).getBoundingSphere(new THREE.Sphere());
-  selMat.size = 2.5 * (c.voxel || 0.01);
-  selPts = new THREE.Points(g, selMat);
+  if (!it) return void (panel.style.display = 'none');
+  selMat.size = 2.5 * (it.c.voxel || 0.01);
+  selPts = itemPts(it, selMat);
   selPts.renderOrder = 999;
-  q.add(selPts);
-  showPanel(it, c);
+  root.add(selPts);
+  showPanel(it, it.c);
 }
 
 // ---------- inspector: right on wide screens, a bottom sheet above the dock on phones ----------
@@ -253,9 +326,9 @@ const panel = h('div', 'dm dm-insp');
 panel.style.display = 'none'; document.body.append(panel);
 let techOpen = false; // "Tehnički podaci" stays as the user left it
 
-const src = (k) => `${BASE}img/${sel}_${k}.jpg`;
+const src = (k) => `${sel.img}${k}.jpg`;
 function crop(k, color, f = h('div', 'dm-ph')) { // photo k's crop in f, with the damage's box (fractions of the crop) over it
-  const [, x0, y0, x1, y1] = J.items[sel].p[k], img = h('img'), b = h('span', 'dm-bx');
+  const [, x0, y0, x1, y1] = sel.p[k], img = h('img'), b = h('span', 'dm-bx');
   img.alt = ''; img.src = src(k);
   img.onerror = () => { img.replaceWith(h('span', 'dm-err', 'Fotografija se nije učitala.')); b.remove(); };
   Object.assign(b.style, { left: x0 * 100 + '%', top: y0 * 100 + '%', width: (x1 - x0) * 100 + '%', height: (y1 - y0) * 100 + '%', borderColor: color });
@@ -264,8 +337,8 @@ function crop(k, color, f = h('div', 'dm-ph')) { // photo k's crop in f, with th
 }
 function showPanel(it, c) {
   const head = h('div', 'dm-head'), x = btn('dm-x', 'Zatvori', svg(XP)), ms = h('div', 'dm-ms'), n = it.p.length;
-  x.onclick = () => select(-1);
-  head.append(swatch(c.color), h('h2', '', `${hr(c)} ${it.id}`), x);
+  x.onclick = () => select(null);
+  head.append(swatch(c.color), h('h2', '', `${hr(c)} ${it.title}`), x);
   for (const [v, l] of [[fmt(it.m, c), c.measure === 'length' ? 'Duljina' : 'Površina'], [n0(n), 'Fotografije']]) {
     const d = h('div'); d.append(h('div', 'num dm-v', v), h('div', 'dm-l', l)); ms.append(d);
   }
@@ -277,10 +350,11 @@ function showPanel(it, c) {
   const tech = h('details', 'dm-tech'), sm = h('summary'), dl = h('div', 'dm-dl');
   sm.innerHTML = svg('<path d="M6 9l6 6 6-6"/>', 14) + 'Tehnički podaci';
   const kv = (k, ...v) => { const d = h('div'); for (const t of v) d.append(h('div', '', t)); dl.append(h('div', '', k), d); };
-  kv('ID oštećenja', `C-${it.id}`); kv('Točke', n0(it.n));
-  if (n) kv('Fotografije', ...it.p.map((p) => J.photos[p[0]]));
+  kv('ID oštećenja', it.tid); kv('Točke', n0(it.n)); kv('Izvor', it.xyz ? `prepoznavanje · ${it.time}` : 'aplikacija');
+  if (n) kv('Fotografije', ...it.p.map((p) => p[0]));
   tech.append(sm, dl); tech.open = techOpen; tech.ontoggle = () => (techOpen = tech.open);
   panel.replaceChildren(head, ms, tile, tech);
+  if (it.xyz) { const b = h('button', 'dm-del', 'Obriši oštećenje'); b.type = 'button'; b.onclick = () => del(it, b); panel.append(b); }
   panel.style.display = ''; panel.scrollTop = 0;
 }
 
@@ -294,9 +368,9 @@ let vk = -1, sw = null;
 bx.onclick = () => closeView(); bp.onclick = () => openView(vk - 1); bn.onclick = () => openView(vk + 1);
 
 function openView(k) {
-  const it = J.items[sel], c = J.classes[it.c], n = it.p.length;
+  const it = sel, c = it.c, n = it.p.length;
   if (vk < 0) { // opening: this item's chip and filmstrip
-    chip.replaceChildren(swatch(c.color), `${hr(c)} ${it.id}`);
+    chip.replaceChildren(swatch(c.color), `${hr(c)} ${it.title}`);
     fs.replaceChildren(...it.p.map((_, j) => {
       const t = btn('', `Fotografija ${j + 1} od ${n}`), img = h('img');
       img.alt = ''; img.src = src(j); t.append(img); t.onclick = () => openView(j);
@@ -309,7 +383,7 @@ function openView(k) {
   const f = crop(vk, c.color), img = f.firstChild;
   img.onload = () => (img.style.width = `min(var(--dmw), var(--dmh) * ${(img.naturalWidth / img.naturalHeight).toFixed(4)})`); // fit; small crops scale up
   stage.replaceChildren(f);
-  cap.textContent = J.photos[it.p[vk][0]]; cnt.textContent = `${vk + 1} od ${n}`;
+  cap.textContent = it.p[vk][0]; cnt.textContent = `${vk + 1} od ${n}`;
   for (let j = 0; j < n; j++) fs.children[j].classList.toggle('on', j === vk);
 }
 function closeView() {
@@ -333,5 +407,5 @@ addEventListener('keydown', (e) => {
     if (esc) { closeView(); e.stopPropagation(); }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') openView(vk + (e.key === 'ArrowLeft' ? -1 : 1));
   } else if (esc && !pop.style.display) { layers(false); e.stopPropagation(); }
-  else if (esc && sel >= 0 && !lod.inferArmed) { select(-1); e.stopPropagation(); } // armed: Esc disarms first
+  else if (esc && sel && !lod.inferArmed) { select(null); e.stopPropagation(); } // armed: Esc disarms first
 }, true);

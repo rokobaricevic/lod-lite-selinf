@@ -32,7 +32,7 @@ pivot. The dock at the bottom: Slojevi (damage classes, opacity), Prepoznaj ošt
 Prikaži cijeli most (fit), Tehnički prikaz (the developer HUD: fps, tiles, LOD sliders; hidden by default).
 URL params: `?tileset=`, `?lru=<MB>` (default 3072, 512 on touch devices), `?uncapped` (render as fast as the GPU
 finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
-`?damage=<dir>` (default `out/damage/`), `?title=` (the structure's name in the title pill). On touch devices the LOD error target
+`?damage=<dir>` (default `out/damage/`), `?found=<dir>` (default `out/found/`), `?title=` (the structure's name in the title pill). On touch devices the LOD error target
 is 32 px (16 elsewhere): iOS Safari kills a tab that holds ~1 GB, and a close view of the deck at full detail does.
 
 ## Damage (the app's, from lynceus)
@@ -54,6 +54,12 @@ crack_lengths.json, points_sources.bin, the photos) into `out/damage/`, static f
 In the viewer: Slojevi has one toggle per class (with its count and total) and the damage opacity. Click or tap a
 damage: the inspector (a bottom sheet on a phone) shows its class, length or area and photos; a photo opens full
 screen with a filmstrip of the others (← → or swipe, Esc closes).
+
+What "Prepoznaj oštećenja" finds is saved on the PC (`selinf.py`'s FoundStore, in `out/found/`: `found.json`, one
+float32 `<id>.bin` per find, photo crops) and shown like the app's damage, for everyone, across reloads and
+restarts: its crack length (lynceus's own skeleton length) or area, up to 3 photos picked with the same least-overlap
+rule, the damage boxed. Analysing the same damage again replaces the earlier find; "Obriši oštećenje" in the inspector
+deletes one (`POST /found/delete {"id": "p7"}`). `./test.sh data` never sends or counts `out/found` (it is the PC's).
 
 ## Selective inference (on the PC)
 

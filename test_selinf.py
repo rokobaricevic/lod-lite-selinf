@@ -535,9 +535,152 @@ def test_the_server_wants_the_login_and_serves_only_the_viewer(tmp_path):
             raise AssertionError("HEAD answered")
         assert json.loads(get("/health")[1]) == {"ok": True, "photos": len(s.core.names), "classes": ["Crack"]}
         code, body = get("/click", body=click)
-        assert code == 200 and decode(body)[1]["class"] == "Crack"
+        assert code == 200 and decode(body)[1]["class"] == "Crack" and "found" not in decode(body)[1]   # no store
+        assert get("/found/delete", body=b'{"id": "p1"}')[0] == 404
         code, body = get("/click", body=b"{}")
         assert code == 500 and "error" in decode(body)[1]
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+# ---------------------------------------------------------------- the finds: saved, replaced, deleted
+def found_store(s, folder, values=None, store=None):
+    """A FoundStore over make_survey's photos, written as small JPEGs where photos.json puts them."""
+    import selinf
+
+    X, Y = np.meshgrid(np.arange(400), np.arange(300))
+    img = np.dstack([X * 255 // 400, Y * 255 // 300, (X + Y) % 256]).astype(np.uint8)
+    for path in s.path_of.values():
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        cv2.imencode(".jpg", img)[1].tofile(path)
+    shas = {Path(k).stem.lower(): Path(v).name for k, v in s.path_of.items()}
+    return (store or selinf.FoundStore)(folder, values or {}, shas, s.root / "assets")
+
+
+def serve(srv):
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+
+    def fetch(path, body=None, headers=None):
+        try:
+            with urlopen(Request(f"http://127.0.0.1:{srv.server_address[1]}{path}", body, headers or {})) as r:
+                return r.status, r.read()
+        except HTTPError as e:
+            return e.code, e.read()
+    return fetch
+
+
+def test_a_find_is_saved_replaced_and_deleted(tmp_path):
+    import selinf
+
+    s = make_survey(tmp_path)
+    folder = tmp_path / "site" / "out" / "found"
+    store = found_store(s, folder)
+    srv = selinf.server(s.core, strip_infer(s, []), ["Crack"], tmp_path / "site", port=0, found=store)
+    fetch = serve(srv)
+    ray = {"origin": [6.0, 0.3, 3.0], "direction": [0.0, -0.3, -3.0]}
+    click = json.dumps(ray).encode()
+    try:
+        code, body = fetch("/click", click)
+        n, head, xyz = decode(body)
+        ref = decode(s.core.click(ray["origin"], ray["direction"], strip_infer(s, [])))   # the same click, no store
+        assert code == 200 and n % 4 == 0 and body[4 + n - 1:4 + n] in (b"}", b" ")
+        assert list(head) == [*ref[1], "found", "replaced"] and head["replaced"] == []
+        assert np.array_equal(xyz, ref[2]) and len(body) == 4 + n + 12 * len(xyz)   # the layers, as they were
+        it, k = head["found"], head["points"]["Crack"]
+        assert (it["id"], it["class"], it["voxel"], it["measure"], it["n"]) == ("p1", "Crack", 0.01, "length", k)
+        assert 11.0 < it["m"] < 12.5                                               # the 12 m strip, lynceus's length
+        assert it["b"] == [round(float(v), 3) for v in (*xyz[:k].min(0), *xyz[:k].max(0))]
+        assert np.allclose(it["seed"], [6.0, 0, 0], atol=1e-3) and len(it["time"]) == 19
+        assert 2 <= len(it["p"]) <= 3                                              # 4 m of the strip per photo
+        assert all(p[0].startswith("DJI_") and 0 <= p[1] < p[3] <= 1 and 0 <= p[2] < p[4] <= 1 for p in it["p"])
+        assert len({p[0] for p in it["p"]}) == len(it["p"])
+        doc = json.loads((folder / "found.json").read_text())
+        assert doc == {"format": 1, "next": 2, "items": [it]}
+        assert (folder / "p1.bin").read_bytes() == xyz[:k].tobytes()
+        for j in range(len(it["p"])):
+            jpg = cv2.imread(str(folder / "img" / f"p1_{j}.jpg"))
+            assert jpg is not None and 0 < max(jpg.shape[:2]) <= 400
+        assert sorted(f.name for f in (folder / "img").iterdir()) == [f"p1_{j}.jpg" for j in range(len(it["p"]))]
+        stale = {"If-Modified-Since": "Fri, 01 Jan 2100 00:00:00 GMT"}               # found.json: never 304
+        assert fetch("/out/found/found.json", headers=stale) == (200, (folder / "found.json").read_bytes())
+        assert fetch("/out/found/p1.bin") == (200, xyz[:k].tobytes())
+
+        code, body = fetch("/click", click)                                        # the same crack again: replaced
+        it2 = decode(body)[1]["found"]
+        assert (it2["id"], decode(body)[1]["replaced"]) == ("p2", ["p1"])
+        assert json.loads((folder / "found.json").read_text())["items"] == [it2]
+        assert sorted(f.name for f in folder.rglob("*") if f.is_file()) == sorted(
+            ["found.json", "p2.bin", *(f"p2_{j}.jpg" for j in range(len(it2["p"])))])
+
+        _, body = fetch("/click", json.dumps({"origin": [6.0, 0, 3.0], "direction": [0, 0, 1.0]}).encode())   # missed
+        assert "found" not in decode(body)[1]
+        _, body = fetch("/click", json.dumps({"origin": [6.0, 2.0, 3.0], "direction": [0, 0, -1.0]}).encode())   # clean
+        assert decode(body)[1]["class"] is None and "found" not in decode(body)[1]
+
+        assert fetch("/found/delete", b'{"id": "p2"}') == (200, b'{"ok": true, "id": "p2"}')
+        assert json.loads((folder / "found.json").read_text()) == {"format": 1, "next": 3, "items": []}
+        assert [f.name for f in folder.rglob("*") if f.is_file()] == ["found.json"]
+        code, body = fetch("/found/delete", b'{"id": "p2"}')
+        assert code == 404 and "p2" in json.loads(body)["error"]
+        assert fetch("/found/delete", b"p2")[0] == fetch("/found/delete", b"{}")[0] == 400
+        assert decode(fetch("/click", click)[1])[1]["found"]["id"] == "p3"              # an id is never reused
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a_find_replaces_only_its_class_where_it_overlaps(tmp_path):
+    s = make_survey(tmp_path)
+    folder = tmp_path / "found"
+    store = found_store(s, folder, {"bake.voxel_size_m": {"*": 0.01, "Crack": 0.005}})
+
+    def save(cls, x0, side=20, photos=("DJI_13_1", "DJI_14_1")):   # a side x side patch of 1 cm points at x0
+        X, Y = np.meshgrid(np.arange(side) * 0.01, np.arange(side) * 0.01)
+        P = np.c_[X.ravel() + x0, Y.ravel(), np.zeros(side * side)].astype("<f4")
+        head = {"seed": [x0, 0.0, 0.0], "class": cls, "points": {cls: len(P)}, "photos": [{"name": n} for n in photos]}
+        it, replaced = store.save(s.core, head, P)
+        return it["id"], replaced, it
+
+    fid, replaced, it = save("Spalling", 6.0)
+    assert (fid, replaced, it["voxel"], it["measure"], it["m"], it["n"]) == ("p1", [], 0.01, "area", 0.04, 400)
+    assert [p[0] for p in it["p"]] == ["DJI_13_1"]       # both see all of it: the first, the second adds nothing
+    fid, replaced, it = save("Crack", 6.0)
+    assert (fid, replaced, it["voxel"], it["measure"]) == ("p2", [], 0.005, "length")   # another class stays
+    assert save("Spalling", 6.15)[:2] == ("p3", [])      # 5 of 20 columns shared: 25 %
+    assert save("Spalling", 6.12)[:2] == ("p4", ["p1", "p3"])   # 40 % of p1's, 85 % of p3's
+    assert save("Spalling", 7.0, side=4)[:2] == ("p5", [])
+    assert save("Spalling", 6.9)[:2] == ("p6", ["p5"])   # all of p5's cells, 4 % of its own
+    Path(s.path_of["DJI_13_1.JPG"]).unlink()
+    fid, _, it = save("Rust", 6.0, photos=("DJI_13_1", "DJI_13_1", "DJI_14_1"))
+    assert it["p"] == []                                 # the pick's photo is missing: dropped (DJI_14_1 adds nothing)
+    assert [it["id"] for it in store.items] == ["p2", "p4", "p6", "p7"]
+
+    (folder / "p9.bin").write_bytes(b"")                 # a save cut short
+    (folder / "img" / "p9_0.jpg").write_bytes(b"")
+    (folder / "found.json.tmp").write_bytes(b"{")
+    again = found_store(s, folder)
+    assert again.items == store.items and again.next == 8
+    assert not any((folder / f).exists() for f in ("p9.bin", "img/p9_0.jpg", "found.json.tmp"))
+    assert all((folder / f).exists() for it in again.items for f in again.files(it))
+    assert again.delete("p4") and not again.delete("p4") and not (folder / "p4.bin").exists()
+
+
+def test_a_save_that_fails_answers_the_click_without_it(tmp_path):
+    import selinf
+
+    class Full(selinf.FoundStore):
+        def save(self, *_):
+            raise OSError("disk full")
+
+    s = make_survey(tmp_path)
+    srv = selinf.server(s.core, strip_infer(s, []), ["Crack"], tmp_path / "site", port=0,
+                        found=found_store(s, tmp_path / "site" / "out" / "found", store=Full))
+    click = json.dumps({"origin": [6.0, 0.3, 3.0], "direction": [0.0, -0.3, -3.0]}).encode()
+    try:
+        code, body = serve(srv)("/click", click)
+        n, head, xyz = decode(body)
+        assert code == 200 and head["class"] == "Crack" and "found" not in head and len(xyz) > 1000
     finally:
         srv.shutdown()
         srv.server_close()

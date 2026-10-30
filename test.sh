@@ -111,12 +111,13 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 if [ "${1:-}" = data ]; then   # tar's stream straight into the PC folder: about 10 GB, no copy on either side
+  # out/found is the PC server's own (the finds people saved): never sent, never counted
   pc 'New-Item -ItemType Directory -Force -Path $root | Out-Null'
-  COPYFILE_DISABLE=1 tar -C "$here" --no-xattrs --exclude .DS_Store --exclude work/numba -cf - source work out |
+  COPYFILE_DISABLE=1 tar -C "$here" --no-xattrs --exclude .DS_Store --exclude work/numba --exclude out/found -cf - source work out |
     ssh lynceus-win "C:\Windows\System32\tar.exe -xf - -C C:/Users/rokob/lod-lite-selinf"
   for d in source work out; do
-    n="$(find "$here/$d" -type f -not -name .DS_Store -not -path '*/work/numba/*' | wc -l | tr -d ' ')"
-    m="$(pc "(Get-ChildItem -LiteralPath \"\$root\\$d\" -Recurse -File).Count" | tr -d '\r')"
+    n="$(find "$here/$d" -type f -not -name .DS_Store -not -path '*/work/numba/*' -not -path '*/out/found/*' | wc -l | tr -d ' ')"
+    m="$(pc "(Get-ChildItem -LiteralPath \"\$root\\$d\" -Recurse -File | Where-Object { \$_.FullName -notlike \"\$root\\out\\found\\*\" }).Count" | tr -d '\r')"
     [ "$n" = "$m" ] || { echo "test.sh: $d has $n files here, $m on the PC" >&2; exit 1; }
     echo "$d: $n files"
   done

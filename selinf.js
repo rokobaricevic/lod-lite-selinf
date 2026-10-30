@@ -1,6 +1,7 @@
 // Selective inference: alt-click the bridge, or arm the dock tool "Prepoznaj oštećenja" and then click / tap it -> the
-// PC runs the damage models only on the photos around the click (selinf.py, which also serves this page) and the
-// result is drawn here. ?selinf=<url> overrides the server (default: the one this page came from).
+// PC runs the damage models only on the photos around the click (selinf.py, which also serves this page). It saves what
+// it finds, and damage.js shows that (event lod-found); an older server's result is only drawn here. ?selinf=<url>
+// overrides the server (default: the one this page came from).
 import * as THREE from 'three';
 
 const lod = window.lod, ui = lod.ui;
@@ -12,6 +13,8 @@ const NAME = { Crack: 'Pukotina', ExposedRebars: 'Ogoljela armatura', Rust: 'Kor
 const IDLE = 'selective inference: the dock\'s sparkle tool, then click the bridge (or alt-click it)';
 const TOUCH = matchMedia('(pointer: coarse)').matches, hr = new Intl.NumberFormat('hr-HR');
 const photos = (n) => `${hr.format(n)} ${n % 10 > 1 && n % 10 < 5 && (n % 100 < 12 || n % 100 > 14) ? 'fotografije' : 'fotografija'}`;
+const n2 = new Intl.NumberFormat('hr-HR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }); // " · 1,84 m", " · 0,12 m²", " · 22 cm²"
+const measure = (f) => (f?.m == null ? '' : ` · ${f.measure === 'length' ? n2.format(f.m) + ' m' : f.m < 0.01 ? hr.format(Math.round(f.m * 1e4)) + ' cm²' : n2.format(f.m) + ' m²'}`);
 
 const root = new THREE.Group();
 root.rotation.x = -Math.PI / 2; // source (bake) frame, like tiles.group
@@ -94,14 +97,17 @@ lod.el.addEventListener('click', async (e) => {
     let at = 4 + n;
     for (const part of [res.points, res.full]) for (const c in part) { part[c] = new Float32Array(buf, at, part[c] * 3); at += part[c].byteLength; }
     seed.position.fromArray(res.seed);
-    const ns = cloud(sel, res.points), nf = cloud(full, res.full);
+    const f = res.found, ns = Object.values(res.points || {}).reduce((a, x) => a + x.length / 3, 0), nf = cloud(full, res.full);
+    cloud(sel, !f && res.points); // a saved find is damage.js's to draw (clickable, for everyone)
     const grow = res.photos.filter((x) => x.phase === 'grow').length, s = res.seconds, k = res.photos.length;
     status.textContent = `${res.class || '-'}: ${res.stop}\n` +
       `${k} photos (${grow} grow + ${k - grow} confirm)\n` +
       `${s.total} s (models ${s.models} s, bake ${s.bake} s)\n` +
-      `points: selective ${ns.toLocaleString()} | full run ${nf.toLocaleString()}`;
+      `points: selective ${ns.toLocaleString()} | full run ${nf.toLocaleString()}` +
+      (f ? `\nsaved ${f.id}${res.replaced?.length ? ', replaces ' + res.replaced.join(' ') : ''}` : '');
     unhint = ui.hint(!k ? 'Nijedna fotografija ne prikazuje to mjesto.' : !res.class || !ns ? 'Nisu otkrivena oštećenja.'
-      : `${NAME[res.class] || res.class} · ${photos(k)} · ${hr.format(Math.round(s.total))} s`, 8000);
+      : `${NAME[res.class] || res.class}${measure(f)} · ${photos(k)} · ${hr.format(Math.round(s.total))} s`, 8000);
+    if (f) dispatchEvent(new CustomEvent('lod-found', { detail: { found: f, replaced: res.replaced || [] } }));
   } catch (err) {
     status.textContent = `failed: ${err.message}\n(is the PC server running? ./test.sh)`;
     const msg = String(err.message).replace(/^\w+\((['"])(.*)\1\)$/s, '$2'); // the server sends repr(exc)
