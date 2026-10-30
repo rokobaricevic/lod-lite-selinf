@@ -1,35 +1,81 @@
 <!doctype html>
-<html><head><meta charset="utf-8"><title>LOD viewer</title>
+<html lang="hr"><head><meta charset="utf-8"><title>Ui Inspect</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<link rel="stylesheet" data-soft href="https://fonts.googleapis.com/css2?family=Jura:wght@600;700&display=swap">
 <style>
-html,body{margin:0;height:100%;background:#15171a;overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-text-size-adjust:100%}
-canvas{display:block;width:100%;height:100%;outline:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
-#hud{position:fixed;top:6px;left:6px;font:11px/1.35 ui-monospace,Menlo,monospace;color:#d8d8d8;background:rgba(0,0,0,.6);padding:6px 8px;border-radius:3px;min-width:250px;user-select:none}
-#hud pre{margin:0 0 4px;font:inherit}
-#hud label{display:block;cursor:pointer}
-#hud .row{display:flex;gap:6px;align-items:center}
-#hud input[type=range]{flex:1;height:12px}
-#hud .hint{color:#888;margin-top:4px}
-#fold{display:none}
-/* small screens: the HUD folds behind #fold, scrolls, and keeps clear of the notch; open, it covers the other panels */
-@media (max-width:700px),(pointer:coarse){
-#hud{z-index:20;top:calc(6px + env(safe-area-inset-top));left:calc(6px + env(safe-area-inset-left));-webkit-user-select:none;overflow:auto;overscroll-behavior:contain;
-  max-width:calc(100% - 28px - env(safe-area-inset-left) - env(safe-area-inset-right));max-height:calc(100% - 24px - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
-#hud pre{white-space:pre-wrap}
-#fold{display:block;float:right;width:40px;height:40px;margin:-6px -8px 0 4px;padding:0;border:0;background:none;color:inherit;font-size:20px;cursor:pointer}
-#hud.min{min-width:0;padding:0}
-#hud.min #fold{margin:0}
-#hud.min #stats,#hud.min #ctl{display:none}
-#hud.min #err:not(:empty){padding:6px 8px}
+/* Ui Inspect tokens (lynceus C2 Studio); damage.js uses them too */
+:root{
+ --ink0:#0C0C0D;--ink1:#1C1C1E;--ink2:#2C2C2E;--ink4:#3A3A3C;
+ --line:#2C2C2E;--line-soft:#232325;--line-hi:#3A3A3C;
+ --t-hi:#FFF;--t:#F2F2F2;--t-mid:#C7C7CC;--t-low:#A1A1A6;--t-off:#8E8E93;--icon:#E5E5EA;
+ --ac:#1F6FEB;--ac-text:#FFF;--ac-fg:#5A9BFF;--ac-dim:#1D2C47;--ac-halo:#1F4A8F;--ac-disabled:#1B3561;
+ --scrim:rgba(0,0,0,.6);--fp-shadow:0 8px 28px rgba(0,0,0,.55);--pin-shadow:0 2px 8px rgba(0,0,0,.5);
+ --dialog-shadow:0 24px 64px rgba(0,0,0,.7);
+ --font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI Variable","Segoe UI",system-ui,sans-serif;
+ --font-display:"Jura",var(--font-sans);
+ --font-mono:"IBM Plex Mono",ui-monospace,"SFMono-Regular",Menlo,monospace;
+ --r-sm:8px;--r:10px;--r-pill:12px;--r-panel:14px;--r-swatch:3px;
+ --inset:16px;--h-btn:34px;--h-row:42px;--h-pill:44px;--h-dock:52px;--h-tool:40px;--w-insp:332px;--fast:80ms;
 }
-/* fingers */
+@media (pointer:coarse){:root{--h-tool:44px;--h-dock:56px}} /* fingers: 44 px tools, the dock grows with them */
+html,body{margin:0;height:100%;overflow:hidden;overscroll-behavior:none;touch-action:manipulation;-webkit-text-size-adjust:100%}
+html{background:var(--ink0)}
+body{background:var(--ink0);color:var(--t);font:400 13px/1.4 var(--font-sans);-webkit-font-smoothing:antialiased}
+.num{font-variant-numeric:tabular-nums;white-space:nowrap}
+.cap{font:700 11px var(--font-display);letter-spacing:.16em;text-transform:uppercase;color:var(--t-off)}
+[hidden]{display:none!important}
+canvas{display:block;width:100%;height:100%;outline:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
+/* floating chrome: solid cards 16 px from the edges (plus the notch), never translucent */
+#title,#dock,#hint,#hud,#err{position:fixed;box-sizing:border-box;background:var(--ink1);border:1px solid var(--line);box-shadow:var(--fp-shadow)}
+#title,#dock,#hint,#hud{-webkit-user-select:none;user-select:none}
+#title{z-index:10;top:calc(16px + env(safe-area-inset-top));left:calc(16px + env(safe-area-inset-left));height:var(--h-pill);
+  max-width:calc(100% - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));padding:0 12px 0 6px;display:flex;align-items:center;gap:10px;border-radius:var(--r-pill)}
+#title svg{flex:none;width:32px;height:17px;fill:var(--t-hi)}
+#title b{font:700 12px var(--font-display);letter-spacing:.24em;color:var(--t-hi)}
+#title i{flex:none;width:1px;height:20px;background:var(--line)}
+#name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font:600 15px var(--font-display);color:var(--t)}
+#dock{z-index:10;left:50%;bottom:calc(16px + env(safe-area-inset-bottom));transform:translateX(-50%);height:var(--h-dock);padding:5px;display:flex;align-items:center;gap:4px;border-radius:var(--r-panel)}
+#dock .tool{flex:none;width:var(--h-tool);height:var(--h-tool);margin:0;padding:0;border:0;border-radius:var(--r);background:transparent;color:var(--icon);
+  display:flex;align-items:center;justify-content:center;cursor:pointer;touch-action:manipulation;-webkit-tap-highlight-color:transparent;transition:background-color var(--fast),color var(--fast)}
+#dock .tool svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;pointer-events:none}
+@media (hover:hover){#dock .tool:hover:not(:disabled,.on){background:var(--ink2)}}
+#dock .tool.on{background:var(--ac);color:var(--ac-text)}
+#dock .tool:disabled{color:var(--t-off);cursor:default}
+#dock .tool:focus{outline:none}
+#dock .tool:focus-visible{outline:2px solid var(--ac-fg);outline-offset:2px}
+#dock .sep{flex:none;width:1px;height:24px;margin:0 4px;background:var(--line)}
+#hint{z-index:11;left:50%;bottom:calc(28px + var(--h-dock) + env(safe-area-inset-bottom));transform:translateX(-50%);width:max-content;
+  max-width:calc(100% - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));padding:6px 14px;border-radius:999px;font-size:12.5px;color:var(--t-low);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+/* dev HUD: hidden unless "Tehnički prikaz", ?debug or ?uncapped; scrolls, stays clear of the dock */
+#hud{z-index:5;top:calc(76px + env(safe-area-inset-top));left:calc(16px + env(safe-area-inset-left));width:320px;max-width:calc(100% - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));
+  max-height:calc(100% - 108px - var(--h-dock) - env(safe-area-inset-top) - env(safe-area-inset-bottom));overflow:auto;overscroll-behavior:contain;
+  padding:12px;border-radius:var(--r-panel);font:12px/1.4 var(--font-sans);color:var(--t-mid)}
+#hud pre{margin:0 0 8px;font:11px/1.4 var(--font-mono);color:var(--t);white-space:pre-wrap}
+#hud label{display:flex;align-items:center;gap:6px;cursor:pointer}
+#hud .row{display:flex;gap:6px;align-items:center}
+#hud input{accent-color:var(--ac)}
+#hud input[type=range]{flex:1;height:12px}
+#hud .help{color:var(--t-off);margin-top:8px}
+/* errors: no red (red = Crack); a card with what to do, only while it has text */
+#err{z-index:30;top:calc(76px + env(safe-area-inset-top));left:50%;transform:translateX(-50%);width:max-content;max-width:min(440px,calc(100% - 32px));
+  padding:16px;border-radius:var(--r-panel);box-shadow:var(--dialog-shadow);font:13px/1.45 var(--font-sans);color:var(--t-low);white-space:pre-wrap;overflow-wrap:anywhere}
+#err:empty{display:none}
+#err::before{content:"Nešto nije u redu";display:block;margin-bottom:6px;font-weight:600;font-size:15px;color:var(--t)}
+#err::after{content:"Ponovno učitajte stranicu.";display:block;margin-top:8px;color:var(--t)}
+/* phones: mark + name only, the hint under the title pill (the bottom is the inspector's), the HUD full width */
+@media (max-width:700px){
+#title b,#title i{display:none}
+#hint{top:calc(68px + env(safe-area-inset-top));bottom:auto}
+#hud{width:auto;right:calc(16px + env(safe-area-inset-right))}
+}
 @media (pointer:coarse){
-#hud{font-size:12px}
-#hud label,#hud .row{display:flex;align-items:center;gap:6px;min-height:32px}
+#hud label,#hud .row{min-height:32px}
 #hud input[type=range]{height:32px}
 #hud input[type=checkbox]{width:20px;height:20px;margin:0}
 input:not([type=range],[type=checkbox]),select,textarea{font-size:16px} /* smaller ones make iOS zoom in on focus */
 }
+@media (prefers-reduced-motion:reduce){*,::before,::after{transition:none!important;animation:none!important}}
 </style>
 <script type="importmap">{"imports":{
 "three":"https://cdn.jsdelivr.net/npm/three@0.186.1/build/three.module.js",
@@ -37,10 +83,12 @@ input:not([type=range],[type=checkbox]),select,textarea{font-size:16px} /* small
 "3d-tiles-renderer/three":"https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.5.3/build/index.three.js",
 "3d-tiles-renderer/plugins":"https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.5.3/build/index.plugins.js"}}</script>
 </head>
-<body><div id="hud"><button id="fold" aria-label="show/hide the HUD"></button><pre id="stats"></pre><pre id="err" style="color:#ff8080;white-space:pre-wrap"></pre><div id="ctl"></div></div>
-<script>// script and loading errors on the page itself, for whoever has no console open
-const showErr = (m) => { document.getElementById('err').textContent += 'error: ' + m + '\n'; };
-addEventListener('error', (e) => showErr(e.message || 'could not load ' + (e.target?.src || e.target?.href)), true);
+<body><div id="title"><svg viewBox="0 0 116 71" role="img" aria-label="Ui Inspect"><path d="M0 0 L0 35 A36 36 0 0 0 36 71 L83 71 L83 0 L65 0 L65 52 L36 52 A17 17 0 0 1 19 35 L19 0 Z"/><rect x="97" y="0" width="19" height="13"/><rect x="97" y="20" width="19" height="51"/></svg><b aria-hidden="true">INSPECT</b><i></i><span id="name"></span></div>
+<div id="dock" role="toolbar" aria-label="Alati"></div><div id="hint" role="status" hidden></div>
+<div id="hud" hidden><pre id="stats"></pre><div id="ctl"></div></div><div id="err" role="alert"></div>
+<script>// script and loading errors on the page itself, for whoever has no console open (data-soft: the page works without it)
+const showErr = (m) => { const e = document.getElementById('err'); e.textContent += (e.textContent && '\n') + m; };
+addEventListener('error', (e) => { if (e.target?.dataset?.soft == null) showErr(e.message || 'could not load ' + (e.target?.src || e.target?.href)); }, true);
 addEventListener('unhandledrejection', (e) => showErr(e.reason?.message || e.reason));
 </script>
 <script type="module">
@@ -62,7 +110,7 @@ const w2src = (v) => [v.x, -v.z, v.y];
 const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
-renderer.setClearColor(0x15171a);
+renderer.setClearColor(0x0c0c0d); // = --ink0
 document.body.appendChild(renderer.domElement);
 const el = renderer.domElement;
 const scene = new THREE.Scene();
@@ -93,7 +141,7 @@ scene.add(tiles.group);
 const S = { frozen: false, wireframe: false, uncapped: false };
 let diag = 1, center = [0, 0, 0], frames = 0, worst = 0, winT = performance.now(), lastT = winT, fps = 0, frameMs = 0, worstMs = 0;
 const pivot = new THREE.Vector3();
-const marker = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xff3030, depthTest: false }));
+const marker = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false }));
 marker.renderOrder = 999; marker.visible = false; scene.add(marker);
 
 // ---------- orbit / pan / zoom-to-cursor ----------
@@ -226,12 +274,43 @@ function stats() {
   };
 }
 
-// ---------- HUD ----------
-const statsEl = document.getElementById('stats'), ctl = document.getElementById('ctl'), hud = document.getElementById('hud'), fold = document.getElementById('fold');
-// small screens (CSS shows #fold): the HUD body folds away, folded at first on phones and tablets
-const setFold = (on) => { hud.classList.toggle('min', on); fold.textContent = on ? '\u2630' : '\u00d7'; };
-fold.onclick = () => setFold(!hud.classList.contains('min'));
-setFold(matchMedia('(max-width: 700px), (pointer: coarse)').matches);
+// ---------- shell: title pill, dock, hint chip (lod.ui) ----------
+const NAME = params.get('title') || 'Most Volontera, Petrinja', nameEl = document.getElementById('name');
+nameEl.textContent = nameEl.title = NAME; document.title = NAME + ' · Ui Inspect';
+const dock = document.getElementById('dock'), hintEl = document.getElementById('hint'), tools = [];
+let hintN = 0, hintT = 0;
+const ui = {
+  dock,
+  // a dock tool, sorted by order (lower = left), sep = a separator before it; icon = an SVG string (viewBox 0 0 20 20)
+  // or just its paths. btn.classList.toggle('on', x) shows armed / open
+  tool({ label, icon = '', order = 0, sep = false, onClick }) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'tool'; b.title = label; b.setAttribute('aria-label', label); b.onclick = onClick;
+    b.innerHTML = icon.trim().startsWith('<svg') ? icon : `<svg viewBox="0 0 20 20">${icon}</svg>`;
+    b.firstElementChild?.setAttribute('aria-hidden', 'true');
+    tools.push({ b, order, sep }); tools.sort((x, y) => x.order - y.order); // stable: equal orders keep their arrival
+    dock.replaceChildren(...tools.flatMap(({ b, sep }, i) => (sep && i ? [Object.assign(document.createElement('i'), { className: 'sep' }), b] : b)));
+    return b;
+  },
+  // the one-line chip: replaces the last hint, ms > 0 hides it after ms, '' hides it. Returns clear(), which hides it
+  // only while it still shows this hint (so one module's leftover doesn't wipe another's)
+  hint(text, ms = 0) {
+    const n = ++hintN, clear = () => { if (n === hintN) ui.hint(''); };
+    clearTimeout(hintT); hintEl.textContent = text; hintEl.hidden = !text;
+    if (text && ms > 0) hintT = setTimeout(clear, ms);
+    return clear;
+  },
+};
+const ICON = { fit: '<path d="M3 7.5V3h4.5M12.5 3H17v4.5M17 12.5V17h-4.5M7.5 17H3v-4.5"/>',
+  gauge: '<path d="M3.5 15a7.5 7.5 0 1 1 13 0"/><path d="M10 11.3l3.3-3.8"/>' };
+ui.tool({ label: 'Prikaži cijeli most', icon: ICON.fit, order: 30, sep: true, onClick: () => fit() }).title += ' (F)';
+
+// ---------- dev HUD ----------
+// hidden (no numbers on the chrome) unless its dock tool, ?debug or ?uncapped (the owner reads fps there) shows it
+const statsEl = document.getElementById('stats'), ctl = document.getElementById('ctl'), hud = document.getElementById('hud');
+const hudTool = ui.tool({ label: 'Tehnički prikaz', icon: ICON.gauge, order: 40, onClick: () => setHud(hud.hidden) });
+const setHud = (on) => { hud.hidden = !on; hudTool.classList.toggle('on', on); hudTool.setAttribute('aria-pressed', on); };
+setHud(params.has('debug') || params.has('uncapped'));
 function addToggle(label, fn) {
   const l = document.createElement('label'), c = document.createElement('input'); c.type = 'checkbox';
   c.onchange = () => fn(c.checked); l.append(c, ' ' + label); ctl.append(l); return c;
@@ -256,10 +335,10 @@ addToggle('wireframe', (on) => { S.wireframe = on; for (const t of tiles.lruCach
 addToggle('bounding boxes', (on) => { debug.displayBoxBounds = on; debug.update(); });
 addToggle('freeze LOD', (on) => (S.frozen = on));
 const uncapped = addToggle('uncapped fps (GPU-paced)', (on) => setUncapped(on));
-const hint = document.createElement('div'); hint.className = 'hint';
-hint.textContent = TOUCH ? 'drag orbit | pinch zoom | 2-finger pan | double-tap pivot | tap damage'
+const help = document.createElement('div'); help.className = 'help';
+help.textContent = TOUCH ? 'drag orbit | pinch zoom | 2-finger pan | double-tap pivot | tap damage'
   : 'drag orbit | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit';
-ctl.append(hint);
+ctl.append(help);
 
 const maxAniso = renderer.capabilities.getMaxAnisotropy(); // grazing views of the deck stay sharp
 tiles.addEventListener('load-model', ({ scene: s }) => s.traverse((o) => {
@@ -278,7 +357,7 @@ function frame() {
   renderer.render(scene, camera);
   if (now - winT < 250) return; // HUD: frames actually rendered in the last window, and its slowest frame
   fps = (frames * 1000) / (now - winT); frameMs = (now - winT) / frames; worstMs = worst; frames = worst = 0; winT = now;
-  if (!statsEl.offsetParent) return; // HUD folded: skip its sliders and the walk over every loaded tile
+  if (!statsEl.offsetParent) return; // HUD hidden: skip its sliders and the walk over every loaded tile
   const mb = Math.round(tiles.lruCache.maxBytesSize / MB); // slider shows the real cap
   if (document.activeElement !== lru.s && +lru.s.value !== mb) { lru.s.max = Math.max(LRU_MAX_MB, mb); lru.s.value = mb; lru.upd(); }
   if (document.activeElement !== zoom.s) { zoom.s.value = dist2zoom(camera.position.distanceTo(pivot)); zoom.upd(); }
@@ -315,7 +394,7 @@ const ready = new Promise((resolve, reject) => {
   tiles.addEventListener('load-error', (e) => console.warn('[tiles] load-error', e.url, e.error?.message));
   setTimeout(() => reject(new Error('tileset did not load in 30 s: ' + TILESET)), 30000);
 });
-window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl };
+window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl, ui };
 </script>
 <script type="module" src="selinf.js"></script>
 <script type="module" src="damage.js"></script></body></html>

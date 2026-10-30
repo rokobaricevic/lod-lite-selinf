@@ -2,9 +2,10 @@
 
 Streaming LOD viewer for a RealityScan survey (built on Petrinja), made from the existing OBJ parts and
 diffuse atlas with our own decimation and texture re-bake. RealityScan is not run. The app's damage is drawn on
-it: click a damage for its crack length or area and its best photos. Press "inference" and click the bridge (or
-alt-click it) and the PC runs the damage models only on the photos around the click; the damage it finds is
-drawn in the viewer.
+it: click a damage for its crack length or area and its best photos. Press "Prepoznaj oštećenja" and click the
+bridge (or alt-click it) and the PC runs the damage models only on the photos around the click; the damage it
+finds is drawn in the viewer. The page is styled as the lynceus app, Ui Inspect (its v3 "C2 · Studio" tokens and
+components, Croatian product text).
 
 ```
 source/                 *_00000NN.obj parts + *_diffuse.jpg (copy them in)
@@ -27,9 +28,11 @@ The build is resumable, and takes about 30 min and up to ~12 GB RAM for the 50 M
 `viewer.html` is three.js + 3d-tiles-renderer from jsDelivr (needs internet), with no build step.
 Controls: drag to orbit, right/shift-drag to pan, wheel to zoom to the cursor, double-click to set the
 pivot, `F` to fit; on a phone or tablet: drag to orbit, pinch to zoom, two-finger drag to pan, double-tap to set the
-pivot, ☰ for the menu. URL params: `?tileset=`, `?lru=<MB>` (default 3072, 768 on touch devices), `?uncapped`
-(render as fast as the GPU finishes frames), `?selinf=<url>` (another inference server), `?damage=<dir>` (default
-`out/damage/`).
+pivot. The dock at the bottom: Slojevi (damage classes, opacity), Prepoznaj oštećenja (selective inference),
+Prikaži cijeli most (fit), Tehnički prikaz (the developer HUD: fps, tiles, LOD sliders; hidden by default).
+URL params: `?tileset=`, `?lru=<MB>` (default 3072, 768 on touch devices), `?uncapped` (render as fast as the GPU
+finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
+`?damage=<dir>` (default `out/damage/`), `?title=` (the structure's name in the title pill).
 
 ## Damage (the app's, from lynceus)
 
@@ -47,9 +50,9 @@ crack_lengths.json, points_sources.bin, the photos) into `out/damage/`, static f
 ./test.sh damage        # PC: run damage.py next to the data (~20 s), copy out\damage back into out/ (~80 MB)
 ```
 
-In the viewer: the damage section of the menu has an opacity slider and one toggle per class (with its count and
-total). Click or tap a damage: a side panel (a bottom sheet on a phone) shows its class, length or area and photos;
-a photo opens full screen (← → or swipe for the next one, Esc closes).
+In the viewer: Slojevi has one toggle per class (with its count and total) and the damage opacity. Click or tap a
+damage: the inspector (a bottom sheet on a phone) shows its class, length or area and photos; a photo opens full
+screen with a filmstrip of the others (← → or swipe, Esc closes).
 
 ## Selective inference (on the PC)
 

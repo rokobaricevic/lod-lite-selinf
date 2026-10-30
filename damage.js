@@ -1,9 +1,10 @@
-// Damage overlay: the damage point clouds of damage.py (out/damage/) drawn on the bridge, per-class toggles and opacity;
-// tap a damage -> side panel with its measure and photo crops; tap a crop -> a basic photo viewer.
-// ?damage=<dir> overrides the data dir (default out/damage/, relative to this page).
+// Damage overlay: the damage point clouds of damage.py (out/damage/) drawn on the bridge. The dock tool "Slojevi" opens the
+// layers popover (per-class toggles, opacity); tap a damage -> the inspector (measure, photo); tap the photo -> a viewer.
+// ?damage=<dir> overrides the data dir (default out/damage/, relative to this page). The look is lynceus "Ui Inspect": the
+// colours, fonts and sizes are viewer.html's :root tokens; the dock tool and the hint chip come from its lod.ui.
 import * as THREE from 'three';
 
-const lod = window.lod;
+const lod = window.lod, ui = lod.ui;
 let BASE = new URLSearchParams(location.search).get('damage') ?? 'out/damage/';
 if (!BASE.endsWith('/')) BASE += '/';
 const jsonP = fetch(BASE + 'damage.json', { cache: 'no-cache' }), binP = fetch(BASE + 'damage.bin', { cache: 'no-cache' });
@@ -11,43 +12,81 @@ binP.catch(() => {}); // awaited only when the JSON is there
 
 const css = document.createElement('style');
 css.textContent = `
-.dm-hud{margin-top:6px;border-top:1px solid #444;padding-top:4px}
-.dm-hud label{display:flex!important;align-items:center;gap:5px}
-.dm-sw{display:inline-block;width:10px;height:10px;border-radius:2px;flex:none}
-.dm-panel{position:fixed;top:calc(6px + env(safe-area-inset-top));right:calc(6px + env(safe-area-inset-right));width:300px;
- max-height:calc(100% - 12px - env(safe-area-inset-top) - env(safe-area-inset-bottom));box-sizing:border-box;overflow-y:auto;
- overscroll-behavior:contain;z-index:10;font:12px/1.4 ui-monospace,Menlo,monospace;color:#d8d8d8;background:rgba(0,0,0,.75);
- padding:4px 10px 10px;border-radius:3px}
-.dm-head{display:flex;align-items:center;gap:6px;font-weight:bold}
-.dm-x{margin:0 -8px 0 auto;min-width:36px;min-height:36px;background:none;border:0;color:inherit;font:22px/1 sans-serif;cursor:pointer}
-.dm-m{font-size:1.6em;margin:2px 0}
-.dm-n{color:#999}
-.dm-ph{position:relative;margin-top:8px;cursor:zoom-in}
-.dm-ph img{display:block;width:100%}
-.dm-bx{position:absolute;border:2px solid;box-shadow:0 0 0 1px rgba(0,0,0,.7);box-sizing:border-box;pointer-events:none}
-.dm-cap{color:#aaa;word-break:break-all;margin-top:2px}
-.dm-vc{white-space:pre-wrap;text-align:center;padding:0 8px}
-.dm-view{position:fixed;inset:0;z-index:1000;background:rgba(0,0,0,.92);display:flex;flex-direction:column;align-items:center;
- justify-content:center;gap:6px;touch-action:none;user-select:none;font:13px ui-monospace,Menlo,monospace;color:#ddd}
-.dm-view .dm-ph{margin:0;cursor:default}
-.dm-view img{width:auto;max-width:96vw;max-height:86vh;max-height:86dvh} /* dvh: iOS's vh is taller than the visible area */
-.dm-view button{position:absolute;min-width:44px;min-height:44px;background:rgba(0,0,0,.45);border:0;border-radius:4px;color:#fff;
- font:30px/1 sans-serif;cursor:pointer}
-.dm-view .x{top:calc(4px + env(safe-area-inset-top));right:calc(4px + env(safe-area-inset-right))}
-.dm-view .prev{left:calc(4px + env(safe-area-inset-left));top:50%;transform:translateY(-50%)}
-.dm-view .next{right:calc(4px + env(safe-area-inset-right));top:50%;transform:translateY(-50%)}
-@media (max-width:700px){.dm-panel{top:auto;left:0;right:0;bottom:0;width:auto;max-height:45vh;border-radius:8px 8px 0 0;font-size:13px;
- padding:4px calc(12px + env(safe-area-inset-right)) calc(10px + env(safe-area-inset-bottom)) calc(12px + env(safe-area-inset-left))}}
-@media (pointer:coarse){.dm-hud label,.dm-hud .row{min-height:32px}}`;
+:where(.dm) button{margin:0;padding:0;border:0;background:none;color:inherit;font:inherit;cursor:pointer;display:flex;align-items:center;justify-content:center;
+ flex:none;transition:background-color var(--fast),color var(--fast)}
+:where(.dm) :focus-visible{outline:2px solid var(--ac-fg);outline-offset:2px}.dm-sw{flex:none;width:10px;height:10px;border-radius:var(--r-swatch);background:var(--c)}
+.dm-pop,.dm-insp{position:fixed;box-sizing:border-box;background:var(--ink1);border:1px solid var(--line);border-radius:var(--r-panel);box-shadow:var(--fp-shadow);color:var(--t)}
+.dm-pop{z-index:14;bottom:calc(34px + var(--h-dock) + env(safe-area-inset-bottom));width:min(320px,calc(100% - 32px));padding:12px 16px 16px}
+.dm-ar{position:absolute;bottom:-6px;width:10px;height:10px;box-sizing:border-box;background:var(--ink1);border:solid var(--line);border-width:0 1px 1px 0;transform:rotate(45deg)}
+.dm-ph1{display:flex;align-items:center;justify-content:space-between;height:28px}.dm-px{width:28px;height:28px;margin-right:-6px;border-radius:var(--r-sm);color:var(--t-low)}
+.dm-msg{margin-top:8px;font-size:13px}.dm-msg:empty{display:none}.dm-rows{margin-top:4px}
+.dm-row{height:34px;display:flex;align-items:center;gap:10px;font-size:13px;cursor:pointer;-webkit-user-select:none;user-select:none}
+.dm-nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.dm-eye{width:28px;height:28px;border-radius:var(--r-sm);color:var(--icon)}
+.dm-ct,.dm-tot{font-size:12px;color:var(--t-low);text-align:right}.dm-ct{min-width:32px}.dm-tot{width:64px}
+.off .dm-sw{background:none;box-shadow:inset 0 0 0 1.5px var(--t-off)}.off :is(.dm-nm,.dm-ct,.dm-tot){color:var(--t-off)}
+.dm-ol{display:flex;justify-content:space-between;align-items:center;margin-top:12px;font-size:13px}.dm-ol .num{font-size:12px;color:var(--t-low)}
+.dm-sl{-webkit-appearance:none;appearance:none;display:block;width:100%;height:16px;margin:8px 0 0;background:none;cursor:pointer;
+ --fill:linear-gradient(90deg,var(--ac) calc(8px + (100% - 16px) * var(--p,.8)),var(--ink4) 0)} /* blue up to the thumb's centre */
+.dm-sl::-webkit-slider-runnable-track{height:4px;border-radius:2px;background:var(--fill)}.dm-sl::-moz-range-track{height:4px;border-radius:2px;background:var(--fill)}
+.dm-sl::-webkit-slider-thumb{-webkit-appearance:none;width:16px;height:16px;margin-top:-6px;border-radius:50%;background:var(--t-hi);box-shadow:var(--pin-shadow)}
+.dm-sl::-moz-range-thumb{width:16px;height:16px;border:0;border-radius:50%;background:var(--t-hi);box-shadow:var(--pin-shadow)}
+.dm-insp{z-index:12;top:calc(76px + env(safe-area-inset-top));right:calc(16px + env(safe-area-inset-right));width:var(--w-insp);padding:16px;display:flex;
+ flex-direction:column;gap:14px;max-height:calc(100dvh - 92px - env(safe-area-inset-top) - env(safe-area-inset-bottom));overflow-y:auto;overscroll-behavior:contain}
+.dm-head{display:flex;align-items:center;gap:10px}.dm-head .dm-sw{width:12px;height:12px}.dm-head h2{flex:1;min-width:0;margin:0;font:600 22px/26px var(--font-display)}
+.dm-x{width:30px;height:30px;border-radius:var(--r-sm);background:var(--ink2)}
+.dm-ms{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:12px 0;border:solid var(--line);border-width:1px 0}
+.dm-v{font-size:26px;font-weight:500;line-height:1.2}.dm-l{margin-top:2px;font-size:12px;color:var(--t-low)}.dm-none{font-size:13px;color:var(--t-low)}
+.dm-ph{position:relative;background:var(--ink2)}.dm-ph img{display:block;width:100%;aspect-ratio:auto 1/1}
+.dm-tile{display:block;width:100%;border-radius:var(--r);overflow:hidden;cursor:zoom-in}
+.dm-bx{position:absolute;box-sizing:border-box;border:2px solid;box-shadow:0 0 0 1.5px rgba(0,0,0,.6),inset 0 0 0 1.5px rgba(0,0,0,.6);pointer-events:none}
+.dm-chip{position:absolute;left:10px;bottom:10px;height:26px;box-sizing:border-box;display:flex;align-items:center;padding:0 10px;border-radius:var(--r-sm);
+ background:var(--ink1);border:1px solid var(--line);font-size:12px;font-weight:600;white-space:nowrap}
+.dm-err{display:flex;align-items:center;justify-content:center;min-height:120px;padding:16px;font-size:13px;text-align:center}
+.dm-tech{border-top:1px solid var(--line);font-size:13px;color:var(--t-low)}.dm-tech summary{line-height:36px;list-style:none;cursor:pointer}
+.dm-tech summary::-webkit-details-marker{display:none}.dm-tech svg{vertical-align:-2px;margin-right:8px}.dm-tech:not([open]) svg{transform:rotate(-90deg)}
+.dm-dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;font-size:12px}.dm-dl>:nth-child(even){font-family:var(--font-mono);color:var(--t);overflow-wrap:anywhere}
+.dm-view{position:fixed;inset:0;z-index:1000;background:var(--ink0);color:var(--t);touch-action:none;-webkit-user-select:none;user-select:none;--fs:102px;
+ --dmw:calc(100vw - 32px - env(safe-area-inset-left) - env(safe-area-inset-right));--dmh:calc(100dvh - 104px - var(--fs) - env(safe-area-inset-top) - env(safe-area-inset-bottom))}
+.dm-st{position:absolute;inset:calc(72px + env(safe-area-inset-top)) 0 calc(32px + var(--fs) + env(safe-area-inset-bottom));display:flex;align-items:center;justify-content:center}
+.dm-st img{width:min(var(--dmw),var(--dmh))} /* --dmw x --dmh: the area above the filmstrip; dvh: iOS's vh is taller than the visible area */
+.dm-vt{position:absolute;top:calc(16px + env(safe-area-inset-top));left:calc(16px + env(safe-area-inset-left));right:calc(72px + env(safe-area-inset-right));display:flex;
+ align-items:center;gap:12px}
+.dm-vc{height:40px;box-sizing:border-box;flex:none;display:flex;align-items:center;gap:8px;padding:0 12px;border-radius:var(--r-pill);background:var(--ink1);
+ border:1px solid var(--line);font-weight:600;white-space:nowrap}
+.dm-vn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--t-low)}
+.dm-vb{position:absolute;width:40px;height:40px;box-sizing:border-box;border-radius:var(--r);background:var(--ink1);border:1px solid var(--line);color:var(--icon)}
+.dm-vb.x{top:calc(16px + env(safe-area-inset-top));right:calc(16px + env(safe-area-inset-right))}.dm-vb.prev,.dm-vb.next{top:50%;transform:translateY(-50%)}
+.dm-vb.prev{left:calc(16px + env(safe-area-inset-left))}.dm-vb.next{right:calc(16px + env(safe-area-inset-right))}
+.dm-fs{position:absolute;bottom:calc(16px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);box-sizing:border-box;max-width:calc(100% - 32px);display:flex;
+ align-items:center;gap:8px;padding:10px;border-radius:16px;background:var(--ink1);border:1px solid var(--line);overflow-x:auto}
+.dm-fs button{width:120px;height:80px;border-radius:var(--r-sm);overflow:hidden;background:var(--ink2)}.dm-fs .on{box-shadow:0 0 0 2px var(--ac-fg)}
+.dm-fs img{display:block;width:100%;height:100%;object-fit:cover}.dm-fs .num{padding:0 4px;font-size:12px;color:var(--t-low)}
+@media (max-width:700px){.dm-insp{top:auto;left:calc(16px + env(safe-area-inset-left));bottom:calc(28px + var(--h-dock) + env(safe-area-inset-bottom));
+ width:auto;max-height:50dvh}.dm-head h2{font-size:18px;line-height:22px}.dm-view{--fs:78px}.dm-fs button{width:80px;height:56px}}
+@media (pointer:coarse){.dm-row{height:44px}.dm-px,.dm-x,.dm-vb{width:44px;height:44px}.dm-sl{height:44px}.dm-tech summary{line-height:44px}}
+@media (hover:hover){.dm-px:hover,.dm-eye:hover,.dm-vb:hover{background:var(--ink2)}.dm-x:hover{background:var(--ink4)}}`; // reduced motion: viewer.html's global rule
 document.head.append(css);
 
 const h = (tag, cls = '', text = '') => Object.assign(document.createElement(tag), { className: cls, textContent: text });
-const swatch = (color) => { const s = h('span', 'dm-sw'); s.style.background = color; return s; };
-const unit = (c) => (c.measure === 'length' ? 'm' : 'm²');
+const svg = (d, s = 16) => `<svg width="${s}" height="${s}" viewBox="0 0 24 24" fill="none" stroke="currentColor" ` +
+  `stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+const XP = '<path d="M6 6l12 12M18 6L6 18"/>', EYE = '<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>';
+const btn = (cls, label, html = '') => { const b = Object.assign(h('button', cls), { type: 'button', innerHTML: html }); b.setAttribute('aria-label', label); return b; };
+const swatch = (color) => { const s = h('span', 'dm-sw'); s.style.setProperty('--c', color); return s; };
 
-const hud = h('div', 'dm-hud'), status = h('pre', '', 'damage: loading...');
-hud.append(status);
-lod.ctl.append(hud);
+// Croatian names (in the palette order, the legend's) and hr-HR numbers: "1,84 m", "0,12 m²", below 1 dm² "22 cm²", "80 %"
+const HR = { Crack: 'Pukotina', ExposedRebars: 'Ogoljela armatura', Rust: 'Korozija', Spalling: 'Odlamanje betona',
+  Wetspot: 'Vlažna mrlja', Cavity: 'Šupljina', Efflorescence: 'Iscvjetavanje' };
+const ORDER = Object.keys(HR), hr = (c) => HR[c.name] ?? c.name;
+const nf = (o) => new Intl.NumberFormat('hr-HR', o).format, n0 = nf({ maximumFractionDigits: 0 }), pct = nf({ style: 'percent' });
+const n2 = nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const fmt = (v, c) => (v == null ? '—' : c.measure === 'length' ? n2(v) + ' m' : v < 0.01 ? n0(v * 1e4) + ' cm²' : n2(v) + ' m²');
+const fotografij = (n) => `${n0(n)} fotografij${n % 10 > 1 && n % 10 < 5 && (n % 100 < 12 || n % 100 > 14) ? 'e' : 'a'}`; // 2-4, 22-24: -e
+
+const status = h('pre', '', 'damage: loading...'); // the dev HUD's English one-liner
+status.style.cssText = 'margin-top:8px;border-top:1px solid var(--line);padding-top:8px'; lod.ctl.append(status);
+const unhint = ui.hint('Učitavanje oštećenja…'); // clears only while it still shows this hint
+const say = (text, dev, ms) => { ui.hint(text, ms); msg.textContent = text; status.textContent = dev; };
 
 // the GPU dequantises: q maps the unit cube (normalized uint16) onto the data box, inside the Z-up source frame
 const root = new THREE.Group();
@@ -74,31 +113,62 @@ const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); 
 let J = null, Q = null, B, S, K, on = [], pts = [], opacity = 0.8, sel = -1, selPts = null;
 const unitBox = (b) => new THREE.Box3().setFromArray(b.map((v, i) => (v - B[i % 3]) / S[i % 3]));
 
+// ---------- "Slojevi": the layers popover above its dock tool ----------
+const pop = h('div', 'dm dm-pop'), ph = h('div', 'dm-ph1'), px = btn('dm-px', 'Zatvori slojeve', svg(XP));
+const msg = h('div', 'dm-msg', 'Učitavanje oštećenja…'), rows = h('div', 'dm-rows'), ar = h('i', 'dm-ar');
+ph.append(h('span', 'cap', 'Klase oštećenja'), px); pop.append(ph, msg, rows, ar); document.body.append(pop);
+pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Slojevi');
+const tool = ui.tool({ label: 'Slojevi', order: 10, onClick: () => layers(pop.style.display === 'none'),
+  icon: '<path d="M10 3.5l7.5 4.2-7.5 4.2-7.5-4.2z"/><path d="M2.5 12l7.5 4.2 7.5-4.2"/>' }); // layers; lod.ui wraps the <svg>
+px.onclick = () => layers(false);
+ui.dock.addEventListener('click', (e) => tool.contains(e.target) || layers(false)); // another tool: it may need the hint chip under us
+layers(false);
+function layers(open) {
+  pop.style.display = open ? '' : 'none'; tool.classList.toggle('on', open); tool.setAttribute('aria-expanded', open);
+  if (open) place();
+}
+function place() { // centred on the tool, clamped to the screen; the arrow keeps pointing at the tool
+  const r = tool.getBoundingClientRect(), cx = r.left + r.width / 2, w = pop.offsetWidth;
+  const x = Math.max(16, Math.min(cx - w / 2, document.documentElement.clientWidth - 16 - w));
+  pop.style.left = x + 'px'; ar.style.left = cx - x - 6 + 'px'; // 6: half the arrow + the border
+}
+addEventListener('resize', () => pop.style.display || place());
+
+function layersUI() {
+  msg.textContent = '';
+  const rank = (ci) => { const i = ORDER.indexOf(J.classes[ci].name); return i < 0 ? ORDER.length : i; };
+  for (const ci of J.classes.map((_, i) => i).sort((a, b) => rank(a) - rank(b))) {
+    const c = J.classes[ci], row = h('div', 'dm-row'), eye = btn('dm-eye', ''); // the whole row toggles; the eye is its button
+    row.append(swatch(c.color), h('span', 'dm-nm', hr(c)), h('span', 'num dm-ct', n0(c.items)), h('span', 'num dm-tot', fmt(c.total, c)), eye);
+    const show = () => { // hidden: hollow swatch, --t-off text, eye-off
+      row.classList.toggle('off', !on[ci]); eye.innerHTML = svg(on[ci] ? EYE : EYE + '<path d="M3 3l18 18"/>');
+      eye.setAttribute('aria-label', `${on[ci] ? 'Sakrij' : 'Prikaži'} klasu ${hr(c)}`);
+    };
+    row.onclick = () => {
+      on[ci] = !on[ci]; show();
+      if (pts[ci]) pts[ci].visible = on[ci];
+      if (!on[ci] && sel >= 0 && J.items[sel].c === ci) select(-1);
+    };
+    show(); rows.append(row);
+  }
+  const lab = h('div', 'dm-ol'), val = h('span', 'num'), sl = h('input', 'dm-sl');
+  Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
+  sl.setAttribute('aria-label', 'Neprozirnost oštećenja');
+  sl.oninput = () => {
+    opacity = sl.value / 100; val.textContent = pct(opacity); sl.style.setProperty('--p', opacity); // --p: the blue fill
+    for (const p of pts) if (p) p.material.opacity = opacity;
+  };
+  sl.oninput(); lab.append('Neprozirnost oštećenja', val); pop.append(lab, sl);
+}
+
 async function load() {
   const r = await jsonP;
-  if (r.status === 404) return void (status.textContent = 'damage: no data (run damage.py)');
+  if (r.status === 404) return say('Oštećenja nisu dostupna (pokrenite damage.py)', 'damage: no data (run damage.py)', 8000);
   if (!r.ok) throw new Error(`damage.json: HTTP ${r.status}`);
   J = await r.json();
   B = J.box.slice(0, 3); S = B.map((v, i) => Math.max(J.box[i + 3] - v, 1e-6)); K = S.map((s) => s / 65535);
   on = J.classes.map(() => true);
-  const row = h('div', 'row'), t = h('span'), sl = h('input');
-  Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
-  sl.oninput = () => {
-    opacity = sl.value / 100; t.textContent = `opacity ${sl.value} %`;
-    for (const p of pts) if (p) p.material.opacity = opacity;
-  };
-  sl.oninput(); row.append(t, sl); hud.append(row);
-  J.classes.forEach((c, ci) => {
-    const l = h('label'), cb = h('input');
-    cb.type = 'checkbox'; cb.checked = true;
-    cb.onchange = () => {
-      on[ci] = cb.checked;
-      if (pts[ci]) pts[ci].visible = cb.checked;
-      if (!cb.checked && sel >= 0 && J.items[sel].c === ci) select(-1);
-    };
-    l.append(cb, swatch(c.color), `${c.name} ${c.items} · ${+(c.total ?? 0).toPrecision(4)} ${unit(c)}`);
-    hud.append(l);
-  });
+  layersUI();
   status.textContent = `damage: loading ${J.points.toLocaleString()} points...`;
   const br = await binP;
   if (!br.ok) throw new Error(`damage.bin: HTTP ${br.status}`);
@@ -115,8 +185,9 @@ async function load() {
     p.visible = on[ci]; q.add(p); pts[ci] = p;
   });
   status.textContent = `damage  ${J.items.length.toLocaleString()} items · ${(J.points / 1e6).toFixed(2)} M points`;
+  unhint();
 }
-load().catch((e) => (status.textContent = 'damage: failed: ' + e.message));
+load().catch((e) => say(`Oštećenja se nisu učitala: ${e.message}`, 'damage: failed: ' + e.message, 10000));
 
 // ---------- tap to select ----------
 const active = new Set(), caster = new THREE.Raycaster(), sray = new THREE.Ray(), ibox = new THREE.Box3(), at = new THREE.Vector3();
@@ -177,55 +248,73 @@ function select(i) {
   showPanel(it, c);
 }
 
-// ---------- side panel (right on wide screens, bottom sheet on narrow ones) ----------
-const panel = h('div', 'dm-panel');
-panel.style.display = 'none';
-document.body.append(panel);
+// ---------- inspector: right on wide screens, a bottom sheet above the dock on phones ----------
+const panel = h('div', 'dm dm-insp');
+panel.style.display = 'none'; document.body.append(panel);
+let techOpen = false; // "Tehnički podaci" stays as the user left it
 
-function crop(k, color) {
-  const [, x0, y0, x1, y1] = J.items[sel].p[k], f = h('div', 'dm-ph'), img = h('img'), b = h('div', 'dm-bx');
-  img.loading = 'lazy'; img.alt = ''; img.src = `${BASE}img/${sel}_${k}.jpg`;
+const src = (k) => `${BASE}img/${sel}_${k}.jpg`;
+function crop(k, color, f = h('div', 'dm-ph')) { // photo k's crop in f, with the damage's box (fractions of the crop) over it
+  const [, x0, y0, x1, y1] = J.items[sel].p[k], img = h('img'), b = h('span', 'dm-bx');
+  img.alt = ''; img.src = src(k);
+  img.onerror = () => { img.replaceWith(h('span', 'dm-err', 'Fotografija se nije učitala.')); b.remove(); };
   Object.assign(b.style, { left: x0 * 100 + '%', top: y0 * 100 + '%', width: (x1 - x0) * 100 + '%', height: (y1 - y0) * 100 + '%', borderColor: color });
   f.append(img, b);
   return f;
 }
 function showPanel(it, c) {
-  const head = h('div', 'dm-head'), x = h('button', 'dm-x', '×');
-  x.title = 'close (Esc)'; x.onclick = () => select(-1);
-  head.append(swatch(c.color), c.name, h('span', 'dm-n', `C-${it.id}`), x);
-  const m = it.m == null ? '–' : `${+it.m.toPrecision(3)} ${unit(c)}`;
-  panel.replaceChildren(head, h('div', 'dm-m', `${c.measure === 'length' ? 'Length' : 'Area'} ${m}`), h('div', 'dm-n', `${it.n.toLocaleString()} points`));
-  if (!it.p.length) panel.append(h('div', 'dm-n', 'no photos'));
-  it.p.forEach((ph, k) => {
-    const f = crop(k, c.color);
-    f.onclick = () => openView(k);
-    panel.append(f, h('div', 'dm-cap', J.photos[ph[0]]));
-  });
+  const head = h('div', 'dm-head'), x = btn('dm-x', 'Zatvori', svg(XP)), ms = h('div', 'dm-ms'), n = it.p.length;
+  x.onclick = () => select(-1);
+  head.append(swatch(c.color), h('h2', '', `${hr(c)} ${it.id}`), x);
+  for (const [v, l] of [[fmt(it.m, c), c.measure === 'length' ? 'Duljina' : 'Površina'], [n0(n), 'Fotografije']]) {
+    const d = h('div'); d.append(h('div', 'num dm-v', v), h('div', 'dm-l', l)); ms.append(d);
+  }
+  let tile = h('div', 'dm-none', 'Nema fotografija za ovo oštećenje');
+  if (n) {
+    tile = crop(0, c.color, btn('dm-ph dm-tile', 'Otvori fotografije oštećenja'));
+    tile.append(h('span', 'dm-chip', fotografij(n) + ' ›')); tile.onclick = () => openView(0);
+  }
+  const tech = h('details', 'dm-tech'), sm = h('summary'), dl = h('div', 'dm-dl');
+  sm.innerHTML = svg('<path d="M6 9l6 6 6-6"/>', 14) + 'Tehnički podaci';
+  const kv = (k, ...v) => { const d = h('div'); for (const t of v) d.append(h('div', '', t)); dl.append(h('div', '', k), d); };
+  kv('ID oštećenja', `C-${it.id}`); kv('Točke', n0(it.n));
+  if (n) kv('Fotografije', ...it.p.map((p) => J.photos[p[0]]));
+  tech.append(sm, dl); tech.open = techOpen; tech.ontoggle = () => (techOpen = tech.open);
+  panel.replaceChildren(head, ms, tile, tech);
   panel.style.display = ''; panel.scrollTop = 0;
 }
 
-// ---------- photo viewer: the crop already is the close-up, so no zoom ----------
-const view = h('div', 'dm-view'), bx = h('button', 'x', '×'), bp = h('button', 'prev', '‹'), bn = h('button', 'next', '›');
-view.style.display = 'none';
-document.body.append(view);
+// ---------- photo viewer: full screen, over everything; the crop already is the close-up, so no zoom ----------
+const view = h('div', 'dm dm-view'), stage = h('div', 'dm-st'), top = h('div', 'dm-vt'), chip = h('div', 'dm-vc'), cap = h('span', 'dm-vn');
+const fs = h('div', 'dm-fs'), cnt = h('span', 'num'), bx = btn('dm-vb x', 'Zatvori', svg(XP, 20));
+const bp = btn('dm-vb prev', 'Prethodna fotografija', svg('<path d="M15 18l-6-6 6-6"/>', 20));
+const bn = btn('dm-vb next', 'Sljedeća fotografija', svg('<path d="M9 6l6 6-6 6"/>', 20));
+top.append(chip, cap); view.append(stage, top, bx, bp, bn, fs); view.style.display = 'none'; document.body.append(view);
 let vk = -1, sw = null;
-bx.onclick = () => closeView();
-bp.onclick = () => openView(vk - 1);
-bn.onclick = () => openView(vk + 1);
+bx.onclick = () => closeView(); bp.onclick = () => openView(vk - 1); bn.onclick = () => openView(vk + 1);
 
 function openView(k) {
-  const it = J.items[sel], n = it.p.length;
+  const it = J.items[sel], c = J.classes[it.c], n = it.p.length;
+  if (vk < 0) { // opening: this item's chip and filmstrip
+    chip.replaceChildren(swatch(c.color), `${hr(c)} ${it.id}`);
+    fs.replaceChildren(...it.p.map((_, j) => {
+      const t = btn('', `Fotografija ${j + 1} od ${n}`), img = h('img');
+      img.alt = ''; img.src = src(j); t.append(img); t.onclick = () => openView(j);
+      return t;
+    }), cnt);
+    bp.style.display = bn.style.display = n < 2 ? 'none' : '';
+    view.style.display = '';
+  }
   vk = (k + n) % n;
-  const f = crop(vk, J.classes[it.c].color), img = f.firstChild;
-  img.loading = 'eager';
-  img.onload = () => (img.style.width = `min(96vw, ${((86 * img.naturalWidth) / img.naturalHeight).toFixed(2)}dvh)`); // fit, small crops scale up
-  bp.hidden = bn.hidden = n < 2;
-  view.replaceChildren(f, h('div', 'dm-vc', `${J.photos[it.p[vk][0]]}  ${vk + 1} / ${n}`), bx, bp, bn);
-  view.style.display = '';
+  const f = crop(vk, c.color), img = f.firstChild;
+  img.onload = () => (img.style.width = `min(var(--dmw), var(--dmh) * ${(img.naturalWidth / img.naturalHeight).toFixed(4)})`); // fit; small crops scale up
+  stage.replaceChildren(f);
+  cap.textContent = J.photos[it.p[vk][0]]; cnt.textContent = `${vk + 1} od ${n}`;
+  for (let j = 0; j < n; j++) fs.children[j].classList.toggle('on', j === vk);
 }
 function closeView() {
   if (vk < 0) return;
-  vk = -1; view.style.display = 'none'; view.replaceChildren();
+  vk = -1; view.style.display = 'none'; stage.replaceChildren(); fs.replaceChildren();
 }
 view.addEventListener('pointerdown', (e) => (sw = { x: e.clientX, y: e.clientY }));
 view.addEventListener('pointerup', (e) => {
@@ -233,14 +322,16 @@ view.addEventListener('pointerup', (e) => {
   const dx = e.clientX - sw.x, dy = e.clientY - sw.y;
   sw = null;
   if (Math.abs(dx) > 40 && Math.abs(dx) > Math.abs(dy)) openView(vk + (dx < 0 ? 1 : -1));
-  else if (Math.hypot(dx, dy) < 10 && e.target === view) closeView();
+  else if (Math.hypot(dx, dy) < 10 && [view, stage, top].includes(e.target)) closeView(); // a tap on the empty backdrop
 });
 
-// capture: an Esc that closes the viewer or the panel stops here, so selinf.js's Esc doesn't also clear its result
+// capture: an Esc that closes the viewer, the popover or the inspector stops here, so selinf.js's Esc doesn't also clear its result
 addEventListener('keydown', (e) => {
-  if (e.target.tagName === 'INPUT') return;
+  const esc = e.key === 'Escape';
+  if (e.target.tagName === 'INPUT' && !esc) return; // a focused slider keeps its arrow keys
   if (vk >= 0) {
-    if (e.key === 'Escape') { closeView(); e.stopPropagation(); }
+    if (esc) { closeView(); e.stopPropagation(); }
     else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') openView(vk + (e.key === 'ArrowLeft' ? -1 : 1));
-  } else if (e.key === 'Escape' && sel >= 0 && !lod.inferArmed) { select(-1); e.stopPropagation(); } // armed: Esc disarms first
+  } else if (esc && !pop.style.display) { layers(false); e.stopPropagation(); }
+  else if (esc && sel >= 0 && !lod.inferArmed) { select(-1); e.stopPropagation(); } // armed: Esc disarms first
 }, true);
