@@ -151,6 +151,9 @@ def server(core, infer, classes, root, port=8765, auth=None):
     login = auth and ("Basic " + base64.b64encode(auth.encode()).decode()).encode()
 
     class H(SimpleHTTPRequestHandler):
+        extensions_map = {".html": "text/html", ".js": "text/javascript", ".json": "application/json",   # not the
+                          ".glb": "model/gltf-binary"}   # Windows registry's guess: a module script must come as JS
+
         def end_headers(self):  # revalidate every time: a rebuilt tile keeps its url
             self.send_header("Cache-Control", "no-cache")
             super().end_headers()

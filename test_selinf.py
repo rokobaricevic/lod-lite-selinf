@@ -519,6 +519,12 @@ def test_the_server_wants_the_login_and_serves_only_the_viewer(tmp_path):
             assert get(path, "test:wrong", body)[0] == 401
         assert get("/") == get("/viewer.html") == (200, b"viewer.html")
         assert get("/selinf.js") == (200, b"selinf.js") and get("/out/tiles/0.glb?x=1") == (200, b"out/tiles/0.glb")
+        for path, kind in (("/", "text/html"), ("/selinf.js", "text/javascript"), ("/out/tileset.json", "application/json"),
+                           ("/out/tiles/0.glb", "model/gltf-binary")):   # not the Windows registry's (a module needs JS)
+            req = Request(f"http://127.0.0.1:{srv.server_address[1]}{path}",
+                          headers={"Authorization": "Basic " + base64.b64encode(b"test:test").decode()})
+            with urlopen(req) as r:
+                assert r.headers["Content-Type"] == kind, path
         for path in ("/selinf.py", "/job_params.json", "/quit", "/out/../selinf.py", "/out/tiles/", "/source/a.obj"):
             assert get(path)[0] == 404, path
         try:
