@@ -4,7 +4,7 @@
 #   ./test.sh               PC: copy this folder's code, build selinf_core (MSVC) and run test_selinf.py there; then swap
 #                           it in for the running server, start selinf.py (GPU), tunnel it to 127.0.0.1:8765, open the viewer
 #   ./test.sh data          PC: copy source/ work/ out/ (the viewer's tiles, lod.py build's inputs) into the PC folder
-#   ./test.sh public on     publish the PC server on the internet (Tailscale Funnel, https on :8443); off | status
+#   ./test.sh public on     publish the PC server on the internet (a Cloudflare quick tunnel over TCP); off | status
 #   ./test.sh stop          stop the PC server and the tunnel
 #   ./test.sh test          Mac: fetch pybind11 + Embree headers (once), build selinf_core, run test_selinf.py
 # In the viewer: alt-click (option-click) the bridge.
@@ -35,16 +35,6 @@ if [ "${1:-}" = test ]; then
   install_name_tool -change /DLC/embreex/.dylibs/libembree4.4.dylib "$EMB" "$OUT"
   SELINF_REPO="${SELINF_REPO:-$HOME/dev/lynceus}" "$PY" -m pytest -q test_selinf.py
   exit
-fi
-
-if [ "${1:-}" = public ]; then   # Funnel: https://<the PC's tailnet name>:8443/ -> the PC's 127.0.0.1:8765, from anywhere
-  case "${2:-status}" in
-    on) ssh lynceus-win "tailscale funnel --bg --https=8443 http://127.0.0.1:8765" ;;
-    off) ssh lynceus-win "tailscale funnel --https=8443 off" ;;
-    status) ;;
-    *) echo "usage: ./test.sh public on|off|status" >&2; exit 1 ;;
-  esac
-  ssh lynceus-win "tailscale funnel status"; exit
 fi
 
 if [ "${1:-}" = stop ]; then
@@ -119,6 +109,56 @@ if [ "${1:-}" = data ]; then   # tar's stream straight into the PC folder: about
     [ "$n" = "$m" ] || { echo "test.sh: $d has $n files here, $m on the PC" >&2; exit 1; }
     echo "$d: $n files"
   done
+  exit
+fi
+
+# public: https://<random>.trycloudflare.com -> the PC's 127.0.0.1:8765, cloudflared as the scheduled task LodSelinf_tunnel.
+# Over TCP (http2), not Tailscale Funnel: traffic leaving the PC through Tailscale (UDP) is capped at ~1 MB/s, TCP is not.
+if [ "${1:-}" = public ]; then
+  case "${2:-status}" in
+    on) ps STEP <<'PS'
+$exe = "$root\deps\cloudflared.exe"; $log = "$root\logs\tunnel.log"; $bat = "$root\logs\tunnel.bat"
+New-Item -ItemType Directory -Force -Path "$root\deps", "$root\logs" | Out-Null
+if (-not (Test-Path -LiteralPath $exe)) {
+  'fetching cloudflared'
+  & $curl -fsSL -o "$exe.download" 'https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-windows-amd64.exe'
+  Check 'downloading cloudflared'
+  $sig = Get-AuthenticodeSignature -LiteralPath "$exe.download"
+  if ($sig.Status -ne 'Valid' -or $sig.SignerCertificate.Subject -notmatch 'Cloudflare') {
+    Remove-Item -LiteralPath "$exe.download"; throw "cloudflared is not signed by Cloudflare ($($sig.Status)): removed"
+  }
+  Move-Item -LiteralPath "$exe.download" $exe
+}
+Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
+cmd /c "schtasks /Delete /TN LodSelinf_tunnel /F >nul 2>nul"
+Remove-Item -LiteralPath $log -ErrorAction SilentlyContinue
+Set-Content -LiteralPath $bat -Encoding ASCII -Value "@echo off`r`n`"$exe`" tunnel --no-autoupdate --protocol http2 --url http://127.0.0.1:8765 > `"$log`" 2>&1"
+cmd /c "schtasks /Create /TN LodSelinf_tunnel /TR `"$bat`" /SC ONCE /ST 00:00 /IT /F >nul 2>nul"; Check 'schtasks /Create LodSelinf_tunnel'
+try {
+  Set-ScheduledTask -TaskName LodSelinf_tunnel -Settings (New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)) | Out-Null
+} catch { "warning: LodSelinf_tunnel keeps schtasks' default 72 h limit: $_" }
+cmd /c "schtasks /Run /TN LodSelinf_tunnel >nul 2>nul"; Check 'schtasks /Run LodSelinf_tunnel'
+for ($t = 0; $t -lt 60 -and -not $m; $t++) {
+  Start-Sleep 1
+  $m = Select-String -LiteralPath $log -Pattern 'https://[-a-z0-9]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1
+}
+if (-not $m) { Get-Content -LiteralPath $log -ErrorAction SilentlyContinue; throw 'no trycloudflare address after 60 s (its log is above)' }
+"public: $($m.Matches[0].Value)/   (login: the server's)"
+PS
+      pc "$STEP"; ssh lynceus-win "tailscale funnel --https=8443 off" > /dev/null 2>&1 || true ;;   # the slow way in, closed
+    off) ps STEP <<'PS'
+Get-Process cloudflared -ErrorAction SilentlyContinue | Stop-Process -Force
+cmd /c "schtasks /Delete /TN LodSelinf_tunnel /F >nul 2>nul"
+'public: off'
+PS
+      pc "$STEP"; ssh lynceus-win "tailscale funnel --https=8443 off" > /dev/null 2>&1 || true ;;
+    status) ps STEP <<'PS'
+$m = Select-String -LiteralPath "$root\logs\tunnel.log" -Pattern 'https://[-a-z0-9]+\.trycloudflare\.com' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ((Get-Process cloudflared -ErrorAction SilentlyContinue) -and $m) { "public: $($m.Matches[0].Value)/" } else { 'public: off' }
+PS
+      pc "$STEP" ;;
+    *) echo "usage: ./test.sh public on|off|status" >&2; exit 1 ;;
+  esac
   exit
 fi
 

@@ -13,12 +13,12 @@ uv run lod.py serve     # http://127.0.0.1:8000/viewer.html, the tiles only (no 
 
 `lod.py` is the whole pipeline:
 1. Weld all parts into one mesh.
-2. k-d split into 256 leaf tiles of ~200k original triangles.
-3. Simplify bottom-up with meshoptimizer into 64 / 16 / 4 / 1 parent tiles. Borders are locked, so tiles
+2. k-d split into 1024 leaf tiles of ~50k original triangles.
+3. Simplify bottom-up with meshoptimizer into 256 / 64 / 16 / 4 / 1 parent tiles. Borders are locked, so tiles
    at different levels never crack.
 4. Textures: leaves reuse the atlas's own texels. Each UV island's pixel rect is copied at an integer offset,
    so nothing is resampled. Parents are re-baked (xatlas + numba) from the closest point on the original mesh.
-5. Write 3D Tiles 1.1: KTX2 UASTC textures, lossless meshopt geometry,
+5. Write 3D Tiles 1.1: KTX2 ETC1S textures, lossless meshopt geometry,
    geometricError = max(simplify error, 16 × texel).
 
 The build is resumable, and takes about 30 min and up to ~12 GB RAM for the 50 M-triangle Petrinja survey.
@@ -34,13 +34,14 @@ pivot, `F` to fit. URL params: `?tileset=`, `?lru=<MB>`, `?uncapped` (render as 
 and its header describes the loop. `test_selinf.py` checks selinf_core against the lynceus pipeline's own Python.
 
 The whole stack runs on the PC, in `C:\Users\rokob\lod-lite-selinf`: selinf.py serves the viewer, its tiles and the
-clicks on 127.0.0.1:8765, behind a login (`LOGIN`, default test / test).
+clicks on 127.0.0.1:8765, behind a login (`LOGIN`, default test / test). The public address is a Cloudflare quick tunnel over TCP: traffic
+leaving the PC through Tailscale (Funnel, or a tunnel over the tailnet) is capped at ~1 MB/s, plain TCP is not.
 
 ```
 ./test.sh test          # Mac: build selinf_core, run test_selinf.py
 ./test.sh data          # copy source/ work/ out/ into the PC folder (~10 GB)
 ./test.sh               # PC: copy the code, build, test, swap in, start; tunnel to the Mac's 127.0.0.1:8765, open it
-./test.sh public on     # https://oppie.tailfa37ea.ts.net:8443/ for anyone with the login (Tailscale Funnel); off | status
+./test.sh public on     # prints https://<random>.trycloudflare.com/ for anyone with the login; off | status
 ./test.sh stop          # the PC server and the tunnel
 ```
 
