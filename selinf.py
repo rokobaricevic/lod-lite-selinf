@@ -204,8 +204,8 @@ def server(core, infer, classes, root, port=8765, auth=None):
                 body, code = len(head).to_bytes(4, "little") + head, 500
             self.reply(code, body, "application/octet-stream")
 
-        def log_request(self, code="-", size="-"):   # the clicks and the errors, not every tile
-            if self.command == "POST" or isinstance(code, int) and code >= 400:
+        def log_request(self, code="-", size="-"):   # everything but the tiles that load fine
+            if not self.path.startswith("/out/tiles/") or isinstance(code, int) and code >= 400:
                 super().log_request(code, size)
 
         def log_message(self, fmt, *args):

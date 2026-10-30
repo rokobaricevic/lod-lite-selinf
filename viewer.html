@@ -17,7 +17,12 @@ canvas{display:block;width:100%;height:100%;outline:none}
 "3d-tiles-renderer/three":"https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.5.3/build/index.three.js",
 "3d-tiles-renderer/plugins":"https://cdn.jsdelivr.net/npm/3d-tiles-renderer@0.5.3/build/index.plugins.js"}}</script>
 </head>
-<body><div id="hud"><pre id="stats"></pre><div id="ctl"></div></div>
+<body><div id="hud"><pre id="stats"></pre><pre id="err" style="color:#ff8080;white-space:pre-wrap"></pre><div id="ctl"></div></div>
+<script>// script and loading errors on the page itself, for whoever has no console open
+const showErr = (m) => { document.getElementById('err').textContent += 'error: ' + m + '\n'; };
+addEventListener('error', (e) => showErr(e.message || 'could not load ' + (e.target?.src || e.target?.href)), true);
+addEventListener('unhandledrejection', (e) => showErr(e.reason?.message || e.reason));
+</script>
 <script type="module">
 import * as THREE from 'three';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
