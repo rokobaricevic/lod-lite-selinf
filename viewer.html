@@ -381,11 +381,29 @@ tiles.addEventListener('load-model', ({ scene: s }) => s.traverse((o) => {
 }));
 
 // ---------- loop ----------
+// POST until damage.js's lod.renderFrame takes over (or if damage.js failed to load): the scene through an MSAA target of
+// its own (the canvas has no depth), copied to the canvas; freed once damage.js renders
+let plain = null;
+function plainFrame() {
+  if (!plain) {
+    const rt = new THREE.WebGLRenderTarget(1, 1, { samples: 4, colorSpace: THREE.SRGBColorSpace });
+    const copy = new THREE.ShaderMaterial({ uniforms: { t: { value: rt.texture } }, depthTest: false, depthWrite: false,
+      vertexShader: 'void main() { gl_Position = vec4( position.xy, 0.0, 1.0 ); }',
+      fragmentShader: 'uniform sampler2D t;\nvoid main() {\n  gl_FragColor = texelFetch( t, ivec2( gl_FragCoord.xy ), 0 );\n  #include <colorspace_fragment>\n}' });
+    plain = { rt, quad: new THREE.Mesh(new THREE.PlaneGeometry(2, 2), copy), cam: new THREE.OrthographicCamera() };
+    plain.quad.frustumCulled = false;
+  }
+  const { rt, quad, cam } = plain, sz = renderer.getDrawingBufferSize(new THREE.Vector2());
+  if (sz.x !== rt.width || sz.y !== rt.height) rt.setSize(sz.x, sz.y);
+  renderer.setRenderTarget(rt); renderer.render(scene, camera);
+  renderer.setRenderTarget(null); renderer.render(quad, cam);
+}
 function frame() {
   const now = performance.now(), dt = now - lastT; lastT = now; frames++; worst = Math.max(worst, dt);
   camera.updateMatrixWorld();
   tiles.setResolutionFromRenderer(camera, renderer);
   if (!S.frozen) tiles.update();
+  if (plain && window.lod.renderFrame !== plainFrame) { plain.rt.dispose(); plain.quad.material.dispose(); plain = null; } // damage.js took over
   if (window.lod.renderFrame) window.lod.renderFrame(); else renderer.render(scene, camera); // damage.js's passes, or the plain scene
   if (now - winT < 250) return; // HUD: frames actually rendered in the last window, and its slowest frame
   fps = (frames * 1000) / (now - winT); frameMs = (now - winT) / frames; worstMs = worst; frames = worst = 0; winT = now;
@@ -426,8 +444,10 @@ const ready = new Promise((resolve, reject) => {
   tiles.addEventListener('load-error', (e) => console.warn('[tiles] load-error', e.url, e.error?.message));
   setTimeout(() => reject(new Error('tileset did not load in 30 s: ' + TILESET)), 30000);
 });
-window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl, ui, renderer, post: POST };
+// overlays: drawn over everything (depthTest off); damage.js draws them after its composite
+window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl, ui, renderer, post: POST,
+  renderFrame: POST ? plainFrame : undefined, overlays: [marker] };
 </script>
 <!-- ?v=: new urls, so a tab restored from an old cache cannot pair this page with old scripts -->
-<script type="module" src="selinf.js?v=2"></script>
-<script type="module" src="damage.js?v=2"></script></body></html>
+<script type="module" src="selinf.js?v=3"></script>
+<script type="module" src="damage.js?v=3"></script></body></html>

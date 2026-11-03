@@ -305,6 +305,10 @@ function inView(cam) {
   for (const c of C) if (c.on) for (const p of c.g.children) if (fr.intersectsObject(p)) return true;
   return false;
 }
+// lod.overlays (viewer.html's pivot marker, selinf.js's seed: depthTest off, drawn last): over the composite, not under it
+const tops = lod.overlays ?? [], topsOn = [];
+function hideTops() { topsOn.length = 0; for (const o of tops) if (o.visible) { o.visible = false; topsOn.push(o); } }
+function drawTops(cam) { for (const o of topsOn) { o.visible = true; R.render(o, cam); } }
 const gl = R?.getContext(), DB = gl && { scene: [gl.COLOR_ATTACHMENT0, gl.NONE], mask: [gl.NONE, gl.COLOR_ATTACHMENT1] };
 function dbMask() { gl.drawBuffers(DB.mask); }
 function dbScene() { gl.drawBuffers(DB.scene); }
@@ -317,7 +321,7 @@ if (post) lod.renderFrame = () => {
   if (INLINE) return inlineFrame(cam, ca);
   const any = inView(cam);
   scene.resolveDepthBuffer = any; // no damage in view: the mask pass, the depth resolve and the composite's work are skipped
-  root.visible = false;
+  root.visible = false; hideTops();
   R.setRenderTarget(scene); R.render(lod.scene, cam);
   root.visible = true;
   R.autoClear = false;
@@ -331,6 +335,7 @@ if (post) lod.renderFrame = () => {
   quad.material = any ? post.shade : post.copy;
   R.setRenderTarget(null); R.render(quad, post.cam);
   if (selPts) { over.visible = true; R.render(over, cam); over.visible = false; }
+  drawTops(cam);
   R.autoClear = true;
 };
 
@@ -347,13 +352,14 @@ function inlineFrame(cam, ca) {
   if (any && LOD) lodUpdate(cam, (cam.projectionMatrix.elements[5] * dbs.y) / 2);
   root.visible = any;
   if (!any) scene.textures = all.slice(0, 1);
-  R.autoClear = false;
+  R.autoClear = false; hideTops();
   R.render(lod.scene, cam);
   scene.textures = all; root.visible = true;
   U.logFar.value = Math.log2(cam.far + 1); U.pxPerM.value = (cam.projectionMatrix.elements[5] * dbs.y) / 2;
   quad.material = any ? post.shade : post.copy;
   R.setRenderTarget(null); R.render(quad, post.cam);
   if (selPts) { over.visible = true; R.render(over, cam); over.visible = false; }
+  drawTops(cam);
   R.autoClear = true;
 }
 

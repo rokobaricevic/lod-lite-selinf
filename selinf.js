@@ -24,7 +24,7 @@ full.visible = false;
 const seed = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3)),
   new THREE.PointsMaterial({ color: 0xffffff, size: 12, sizeAttenuation: false, depthTest: false }));
 seed.renderOrder = 999; seed.visible = false;
-root.add(sel, full, seed);
+root.add(sel, full, seed); lod.overlays?.push(seed); // over damage.js's composite
 let through = false;
 
 // the dev HUD (lod.ctl): the detailed status and the layer toggles
