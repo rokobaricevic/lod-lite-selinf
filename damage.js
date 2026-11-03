@@ -110,13 +110,18 @@ function patch(s) {
     .replace('#include <logdepthbuf_vertex>', '#include <logdepthbuf_vertex>\n#ifdef USE_LOGARITHMIC_DEPTH_BUFFER\n' +
       'vFragDepth = 1.0 + gl_Position.w * 0.99;\n#ifdef VERTEX_DEPTH\n' +
       'gl_Position.z = ( log2( max( vFragDepth, 1e-6 ) ) * logDepthBufFC - 1.0 ) * gl_Position.w;\n#endif\n#endif\n' +
-      '#ifdef SIZE_OUT\nvSz = log2( max( gl_PointSize, 1.0 ) ) * 0.125;\n#endif\n#ifdef HALF_RES\ngl_PointSize *= 0.5;\n#endif')
-    .replace('void main() {', '#ifdef SIZE_OUT\nvarying float vSz;\n#endif\nvoid main() {');
+      '#if defined( SIZE_OUT ) || defined( MASK_INLINE )\nvSz = log2( max( gl_PointSize, 1.0 ) ) * 0.125;\n#endif\n#ifdef HALF_RES\ngl_PointSize *= 0.5;\n#endif')
+    .replace('void main() {', '#if defined( SIZE_OUT ) || defined( MASK_INLINE )\nvarying float vSz;\n#endif\nvoid main() {');
   if ('VERTEX_DEPTH' in this.defines) s.fragmentShader = s.fragmentShader.replace('#include <logdepthbuf_fragment>', '');
   // SIZE_OUT: the mask's 2nd target gets the sprite's size, log2(px) / 8, for the composite's blur
   s.fragmentShader = s.fragmentShader.replace('void main() {', '#ifdef SIZE_OUT\nlayout( location = 1 ) out highp vec4 pc_fragSize;\n' +
     'varying float vSz;\n#endif\nvoid main() {').replace('#include <premultiplied_alpha_fragment>', '#include <premultiplied_alpha_fragment>\n#ifdef SIZE_OUT\n' +
     'pc_fragSize = vec4( vSz, 0.0, 0.0, 1.0 );\n#endif');
+  // MASK_INLINE: the mask is the scene target's 2nd attachment: the class colour scaled to a max channel of 1 (so the
+  // coverage is its max channel, also after MSAA resolve and mips) and, in alpha, the size code (times the coverage)
+  s.fragmentShader = s.fragmentShader.replace('void main() {', '#ifdef MASK_INLINE\nlayout( location = 1 ) out highp vec4 pc_mask;\n' +
+    'varying float vSz;\n#endif\nvoid main() {').replace('#include <premultiplied_alpha_fragment>', '#include <premultiplied_alpha_fragment>\n#ifdef MASK_INLINE\n' +
+    'pc_mask = vec4( diffuse / max( max( diffuse.r, diffuse.g ), max( diffuse.b, 1e-3 ) ), vSz );\n#endif');
   // HALF_RES: a half-size mask has no depth buffer of the bridge's size: test against its depth texture here
   if ('HALF_RES' in this.defines) {
     s.uniforms.tBridge = post.U.tDepth;
@@ -140,20 +145,31 @@ const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); 
 // at t with a 1 px antialiased edge: round corners instead of squares, gaps narrower than the blur filled; an outline of
 // o px. ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmo= ?dmvox= ?dmvz= ?dmsamples= override the knobs.
 const R = lod.renderer, POST = !!lod.post && !!R;
-const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 0.3, 0], outline: [1, 0.5, 0.3, 1.5] };
+const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 0.3, 0], outline: [1, 0.4, 0.4, 1.5] }; // [mode, k, t, o]
 const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(k) ? +qs.get(k) : d);
-const MODE = knob('dmmode', look[0]), SIZE = POST && MODE === 1 && knob('dmsize', 1), HALF = POST && knob('dmhalf', 0);
-const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}) }; // the class points' defines
+// ?dminline=1: no separate mask target and no depth texture: the points draw, in the scene pass itself, into a 2nd MSAA
+// attachment of the scene target (packed: colour + size code), so the bridge's MSAA depth needs no resolve (ANGLE's D3D11
+// resolves depth with a shader pass: 3.6 ms at 1080p on the Intel iGPU)
+const MODE = knob('dmmode', look[0]), INLINE = POST && knob('dminline', 0), LIN = knob('dmlin', 0);
+const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1), HALF = POST && !INLINE && knob('dmhalf', 0);
+const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
+  ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
 const over = new THREE.Group(); // POST: the selected damage, drawn over the composite
 over.rotation.x = -Math.PI / 2; over.visible = false; lod.scene.add(over);
 const post = POST && (() => {
   const depth = new THREE.DepthTexture(1, 1); depth.type = THREE.UnsignedIntType; // DEPTH_COMPONENT24, shared by both
-  const scene = new THREE.WebGLRenderTarget(1, 1, { samples: knob('dmsamples', 4), depthTexture: depth, colorSpace: THREE.SRGBColorSpace });
-  const mask = new THREE.WebGLRenderTarget(1, 1, { depthTexture: HALF ? null : depth, depthBuffer: !HALF, generateMipmaps: true,
+  const scene = new THREE.WebGLRenderTarget(1, 1, { samples: knob('dmsamples', 4), depthTexture: INLINE ? null : depth, resolveDepthBuffer: !INLINE,
+    colorSpace: THREE.SRGBColorSpace, count: INLINE ? 2 : 1 });
+  if (INLINE) Object.assign(scene.textures[1], { colorSpace: THREE.NoColorSpace, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
+  // ?dmlin=1: the scene target holds sRGB-encoded values in plain RGBA8, like the canvas (three writes a target's colour
+  // space only for XR targets; nothing else reads the flag), instead of SRGB8_ALPHA8 (hardware encode / decode)
+  if (LIN) { scene.isXRRenderTarget = true; scene.texture.internalFormat = 'RGBA8'; }
+  const mask = INLINE ? null : new THREE.WebGLRenderTarget(1, 1, { depthTexture: HALF ? null : depth, depthBuffer: !HALF, generateMipmaps: true,
     minFilter: THREE.LinearMipmapLinearFilter, count: SIZE ? 2 : 1 });
   if (SIZE) mask.textures[1].format = THREE.RedFormat;
-  const U = { tScene: { value: scene.texture }, tMask: { value: mask.texture }, tDepth: { value: depth }, opacity: { value: 0.8 },
-    tSize: { value: mask.textures[SIZE ? 1 : 0] },
+  const mt = INLINE ? scene.textures[1] : mask.texture;
+  const U = { tScene: { value: scene.texture }, tMask: { value: mt }, tDepth: { value: depth }, opacity: { value: 0.8 },
+    tSize: { value: SIZE ? mask.textures[1] : mt },
     logFar: { value: 1 }, pxPerM: { value: 1 }, sprite: { value: 1.5 * knob('dmvox', 0.005) }, minPx: { value: 2.5 },
     kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, outPx: { value: knob('dmo', look[3]) },
     outRef: { value: knob('dmor', 6) } };
@@ -167,6 +183,13 @@ vec3 srgb( vec3 c ) { return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) )
 float lv( float spx ) { return max( 0.0, log2( kSig * spx / 0.65 ) - LOFF ); } // LOFF: the mask's level 0 is level LOFF of the screen
 float spxAt( float d ) { return max( minPx, sprite * pxPerM / ( exp2( d * logFar ) - 1.0 ) ); }
 float level( float d ) { return lv( spxAt( d ) ); }
+#ifdef PACKED
+float cov( vec4 m ) { return max( max( m.r, m.g ), m.b ); } // the mask's coverage and its coverage-weighted size code
+float szc( vec2 uv, float l, vec4 m ) { return m.a; }
+#else
+float cov( vec4 m ) { return m.a; }
+float szc( vec2 uv, float l, vec4 m ) { return textureLod( tSize, uv, l ).r; }
+#endif
 vec4 cubicW( float v ) {
   vec4 n = vec4( 1.0, 2.0, 3.0, 4.0 ) - v, s = n * n * n;
   float x = s.x, y = s.y - 4.0 * s.x, z = s.z - 4.0 * s.y + 6.0 * s.x;
@@ -183,32 +206,46 @@ vec4 bspline( float lod ) { // cubic B-spline of mip level lod: 4 bilinear taps
 }
 void main() {
   ivec2 px = ivec2( gl_FragCoord.xy );
+#ifdef SCENE_SRGB
+  vec3 base = texelFetch( tScene, px, 0 ).rgb;
+#else
   vec3 base = srgb( texelFetch( tScene, px, 0 ).rgb );
+#endif
 #if MODE == 1
   // nothing near this 2x2 quad: the scene. One decision per quad, so fwidth() below sees all 4 pixels
   vec2 q = ( floor( gl_FragCoord.xy * 0.5 ) * 2.0 + 1.0 ) / vec2( textureSize( tScene, 0 ) );
-  if ( textureLod( tMask, q, level( textureLod( tDepth, q, 0.0 ).r ) + 2.0 ).a < 0.5 / 255.0 ) { gl_FragColor = vec4( base, 1.0 ); return; }
+#ifdef NO_DEPTH
+  // no depth texture: first the 32 px level (anything near at all? the sprites' mean size there)
+  vec4 p = textureLod( tMask, q, 5.0 );
+  if ( cov( p ) < 0.5 / 255.0 ) { gl_FragColor = vec4( base, 1.0 ); return; }
+  float spx = exp2( 8.0 * szc( q, 5.0, p ) / cov( p ) ), L = lv( spx );
+  if ( cov( textureLod( tMask, q, L + 2.0 ) ) < 0.5 / 255.0 ) { gl_FragColor = vec4( base, 1.0 ); return; }
+#else
+  if ( cov( textureLod( tMask, q, level( textureLod( tDepth, q, 0.0 ).r ) + 2.0 ) ) < 0.5 / 255.0 ) { gl_FragColor = vec4( base, 1.0 ); return; }
   float spx = spxAt( texelFetch( tDepth, px, 0 ).r ), L = lv( spx );
-#ifdef SIZE_IN
-  // the sprites' own size around here (their mean log2 px, coverage-weighted, from the size target two levels up)
-  float pa = textureLod( tMask, vUv, L + 2.0 ).a;
-  if ( pa > 2.0 / 255.0 ) { spx = exp2( 8.0 * textureLod( tSize, vUv, L + 2.0 ).r / pa ); L = lv( spx ); }
+#endif
+#if defined( SIZE_IN ) || defined( PACKED )
+  // the sprites' own size around here (their mean log2 px, coverage-weighted, two levels up)
+  vec4 pp = textureLod( tMask, vUv, L + 2.0 );
+  float pa = cov( pp );
+  if ( pa > 2.0 / 255.0 ) { spx = exp2( 8.0 * szc( vUv, L + 2.0, pp ) / pa ); L = lv( spx ); }
 #endif
   float L0 = floor( L );
   vec4 m = mix( bspline( L0 ), bspline( L0 + 1.0 ), L - L0 );
-  float sd = ( m.a - thr ) / max( fwidth( m.a ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
-  vec3 col = srgb( m.rgb / max( m.a, 1e-3 ) ), o = mix( base, col, opacity * inner );
+  float B = cov( m ), sd = ( B - thr ) / max( fwidth( B ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
+  vec3 col = srgb( m.rgb / max( B, 1e-3 ) ), o = mix( base, col, opacity * inner );
   float ow = outPx * clamp( spx / outRef, 0.4, 1.0 ); // thinner around small sprites (far away), which it would drown
   if ( ow > 0.0 ) o = mix( o, col * 0.3, min( 1.0, opacity + 0.2 ) * ( clamp( sd + ow + 0.5, 0.0, 1.0 ) - inner ) );
   gl_FragColor = vec4( o, 1.0 );
 #elif MODE == 0
   vec4 m = texelFetch( tMask, px >> int( LOFF ), 0 );
-  gl_FragColor = vec4( mix( base, srgb( m.rgb / max( m.a, 1e-3 ) ), opacity * m.a ), 1.0 );
+  gl_FragColor = vec4( mix( base, srgb( m.rgb / max( cov( m ), 1e-3 ) ), opacity * cov( m ) ), 1.0 );
 #else
   gl_FragColor = vec4( base, 1.0 );
 #endif
 }`;
-  const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', ...(SIZE ? { SIZE_IN: '' } : {}) },
+  const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', ...(SIZE ? { SIZE_IN: '' } : {}), ...(LIN ? { SCENE_SRGB: '' } : {}),
+    ...(INLINE ? { PACKED: '', NO_DEPTH: '' } : {}) },
     depthTest: false, depthWrite: false });
   const shade = sm(MODE), copy = sm(-1), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), shade), cam = new THREE.OrthographicCamera();
   quad.frustumCulled = false;
@@ -258,11 +295,15 @@ function inView(cam) {
   for (const c of C) if (c.on) for (const p of c.g.children) if (fr.intersectsObject(p)) return true;
   return false;
 }
+const gl = R?.getContext(), DB = gl && { scene: [gl.COLOR_ATTACHMENT0, gl.NONE], mask: [gl.NONE, gl.COLOR_ATTACHMENT1] };
+function dbMask() { gl.drawBuffers(DB.mask); }
+function dbScene() { gl.drawBuffers(DB.scene); }
 if (post) lod.renderFrame = () => {
   const { scene, mask, U, quad } = post, cam = lod.camera, ca = R.getClearAlpha();
   R.getDrawingBufferSize(dbs);
-  if (dbs.x !== scene.width || dbs.y !== scene.height) { scene.setSize(dbs.x, dbs.y); mask.setSize(HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y); }
+  if (dbs.x !== scene.width || dbs.y !== scene.height) { scene.setSize(dbs.x, dbs.y); mask?.setSize(HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y); }
   R.info.autoReset = false; R.info.reset(); // the HUD's calls / points: all passes
+  if (INLINE) return inlineFrame(cam, ca);
   root.updateMatrixWorld(); // (the scene's render would do it, after the test)
   const any = inView(cam);
   scene.resolveDepthBuffer = any; // no damage in view: the mask pass, the depth resolve and the composite's work are skipped
@@ -283,6 +324,29 @@ if (post) lod.renderFrame = () => {
   R.autoClear = true;
 };
 
+// INLINE: one scene pass draws the bridge into attachment 0 and the damage (after it: transparent, opaque blending) into
+// attachment 1 (the points switch the draw buffers around their draws); three then resolves both and builds the mask's mips.
+// With no damage in view the mask is neither cleared nor resolved (the target's textures, for that render, are just the first).
+function inlineFrame(cam, ca) {
+  const { scene, U, quad } = post, any = inView(cam), all = scene.textures, st = R.state.buffers;
+  R.getClearColor(clear);
+  R.setRenderTarget(scene);
+  st.color.setMask(true); st.depth.setMask(true);
+  if (any) { dbMask(); R.setClearColor(0, 0); R.clear(true, false, false); }
+  dbScene(); R.setClearColor(clear, ca); R.clear(true, true, false); // (set while the target is bound: three converts it for the target)
+  if (any && LOD) lodUpdate(cam, (cam.projectionMatrix.elements[5] * dbs.y) / 2);
+  root.visible = any;
+  if (!any) scene.textures = all.slice(0, 1);
+  R.autoClear = false;
+  R.render(lod.scene, cam);
+  scene.textures = all; root.visible = true;
+  U.logFar.value = Math.log2(cam.far + 1); U.pxPerM.value = (cam.projectionMatrix.elements[5] * dbs.y) / 2;
+  quad.material = any ? post.shade : post.copy;
+  R.setRenderTarget(null); R.render(quad, post.cam);
+  if (selPts) { over.visible = true; R.render(over, cam); over.visible = false; }
+  R.autoClear = true;
+}
+
 // C: the classes ({name, color, voxel, measure, items + total: the app's, g: its group, mat}); app, finds: the two kinds of
 // damage ({c, n, m, b, p: [[photo name, box]], img, title, tid}; the app's: s = its run in Q, a find's: xyz = its floats)
 let J = null, Q = null, B, S, K, finds = [], opacity = 0.8, sel = null, selPts = null;
@@ -293,6 +357,7 @@ function points(arr, m, box, quant) { // quant: the app's normalized uint16 in t
   g.boundingSphere = box.getBoundingSphere(new THREE.Sphere()); // no scan of 1.7 M points
   const p = new THREE.Points(g, m);
   if (quant) { p.position.fromArray(B); p.scale.fromArray(S); }
+  if (INLINE && m !== selMat) { p.onBeforeRender = dbMask; p.onAfterRender = dbScene; } // in the scene pass: into the mask only
   return p;
 }
 const itemPts = (it, m) => (it.xyz ? points(it.xyz, m, new THREE.Box3().setFromArray(it.b).expandByScalar(0.001), false) // b: to 1 mm
@@ -332,7 +397,7 @@ function klass(name, o) { // the class called name, made on first use: the palet
   if (c) return c;
   const crack = name === 'Crack', r = h('div', 'dm-row'), eye = btn('dm-eye', ''); // the whole row toggles; the eye is its button
   c = { name, color: CL[name]?.[1] ?? '#828A92', voxel: crack ? 0.005 : 0.01, measure: crack ? 'length' : 'area', items: 0, total: 0, ...o, g: new THREE.Group(), row: r };
-  c.mat = POST ? mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { depthWrite: false }, VZ) // opaque, into the mask; both kinds share it
+  c.mat = POST ? mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ) // opaque, into the mask; both kinds share it; INLINE: after the bridge
     : mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { transparent: true, opacity, depthWrite: false });
   c.g.renderOrder = crack ? 1 : 0; // POST: the last write wins, cracks over the areas they cross
   r.append(swatch(c.color), h('span', 'dm-nm', hr(c)), (c.ct = h('span', 'num dm-ct')), (c.tot = h('span', 'num dm-tot')), eye);
