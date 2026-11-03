@@ -155,16 +155,18 @@ const post = POST && (() => {
   const U = { tScene: { value: scene.texture }, tMask: { value: mask.texture }, tDepth: { value: depth }, opacity: { value: 0.8 },
     tSize: { value: mask.textures[SIZE ? 1 : 0] },
     logFar: { value: 1 }, pxPerM: { value: 1 }, sprite: { value: 1.5 * knob('dmvox', 0.005) }, minPx: { value: 2.5 },
-    kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, outPx: { value: knob('dmo', look[3]) } };
+    kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, outPx: { value: knob('dmo', look[3]) },
+    outRef: { value: knob('dmor', 6) } };
   const vertexShader = 'varying vec2 vUv;\nvoid main() { vUv = position.xy * 0.5 + 0.5; gl_Position = vec4( position.xy, 0.0, 1.0 ); }';
   const fragmentShader = `
 uniform sampler2D tScene, tMask, tDepth, tSize;
-uniform float opacity, logFar, pxPerM, sprite, minPx, kSig, thr, outPx;
+uniform float opacity, logFar, pxPerM, sprite, minPx, kSig, thr, outPx, outRef;
 varying vec2 vUv;
 vec3 srgb( vec3 c ) { return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) ) - 0.055, step( 0.0031308, c ) ); }
 // the mip level whose B-spline blurs by kSig sprite sizes; the sprite's size in px from the view depth (log depth buffer)
 float lv( float spx ) { return max( 0.0, log2( kSig * spx / 0.65 ) - LOFF ); } // LOFF: the mask's level 0 is level LOFF of the screen
-float level( float d ) { return lv( max( minPx, sprite * pxPerM / ( exp2( d * logFar ) - 1.0 ) ) ); }
+float spxAt( float d ) { return max( minPx, sprite * pxPerM / ( exp2( d * logFar ) - 1.0 ) ); }
+float level( float d ) { return lv( spxAt( d ) ); }
 vec4 cubicW( float v ) {
   vec4 n = vec4( 1.0, 2.0, 3.0, 4.0 ) - v, s = n * n * n;
   float x = s.x, y = s.y - 4.0 * s.x, z = s.z - 4.0 * s.y + 6.0 * s.x;
@@ -186,17 +188,18 @@ void main() {
   // nothing near this 2x2 quad: the scene. One decision per quad, so fwidth() below sees all 4 pixels
   vec2 q = ( floor( gl_FragCoord.xy * 0.5 ) * 2.0 + 1.0 ) / vec2( textureSize( tScene, 0 ) );
   if ( textureLod( tMask, q, level( textureLod( tDepth, q, 0.0 ).r ) + 2.0 ).a < 0.5 / 255.0 ) { gl_FragColor = vec4( base, 1.0 ); return; }
-  float L = level( texelFetch( tDepth, px, 0 ).r );
+  float spx = spxAt( texelFetch( tDepth, px, 0 ).r ), L = lv( spx );
 #ifdef SIZE_IN
   // the sprites' own size around here (their mean log2 px, coverage-weighted, from the size target two levels up)
   float pa = textureLod( tMask, vUv, L + 2.0 ).a;
-  if ( pa > 2.0 / 255.0 ) L = lv( exp2( 8.0 * textureLod( tSize, vUv, L + 2.0 ).r / pa ) );
+  if ( pa > 2.0 / 255.0 ) { spx = exp2( 8.0 * textureLod( tSize, vUv, L + 2.0 ).r / pa ); L = lv( spx ); }
 #endif
   float L0 = floor( L );
   vec4 m = mix( bspline( L0 ), bspline( L0 + 1.0 ), L - L0 );
   float sd = ( m.a - thr ) / max( fwidth( m.a ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
   vec3 col = srgb( m.rgb / max( m.a, 1e-3 ) ), o = mix( base, col, opacity * inner );
-  if ( outPx > 0.0 ) o = mix( o, col * 0.3, min( 1.0, opacity + 0.2 ) * ( clamp( sd + outPx + 0.5, 0.0, 1.0 ) - inner ) );
+  float ow = outPx * clamp( spx / outRef, 0.4, 1.0 ); // thinner around small sprites (far away), which it would drown
+  if ( ow > 0.0 ) o = mix( o, col * 0.3, min( 1.0, opacity + 0.2 ) * ( clamp( sd + ow + 0.5, 0.0, 1.0 ) - inner ) );
   gl_FragColor = vec4( o, 1.0 );
 #elif MODE == 0
   vec4 m = texelFetch( tMask, px >> int( LOFF ), 0 );
@@ -260,10 +263,12 @@ if (post) lod.renderFrame = () => {
   R.getDrawingBufferSize(dbs);
   if (dbs.x !== scene.width || dbs.y !== scene.height) { scene.setSize(dbs.x, dbs.y); mask.setSize(HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y); }
   R.info.autoReset = false; R.info.reset(); // the HUD's calls / points: all passes
+  root.updateMatrixWorld(); // (the scene's render would do it, after the test)
+  const any = inView(cam);
+  scene.resolveDepthBuffer = any; // no damage in view: the mask pass, the depth resolve and the composite's work are skipped
   root.visible = false;
   R.setRenderTarget(scene); R.render(lod.scene, cam);
   root.visible = true;
-  const any = inView(cam);
   R.autoClear = false;
   if (any) {
     if (LOD) lodUpdate(cam, (cam.projectionMatrix.elements[5] * dbs.y) / 2);
