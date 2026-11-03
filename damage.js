@@ -146,6 +146,10 @@ const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); 
 // with a 1 px antialiased edge: round corners instead of squares, gaps narrower than the blur filled; an outline of o px.
 // ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmo= ?dmvz= ?dmsamples= ?dmhalf= (a half-size mask, not inline) tune it.
 const R = lod.renderer, POST = !!lod.post && !!R;
+// PAD: every mip level the composite reads (up to 5: 32 px) halves the mask exactly. An odd size halves unevenly (1080 rows:
+// 135 at level 3, then 67): ANGLE's D3D11 mips then sample a 2-texel footprint of 2.01 and a thin line fades out of levels
+// 4-5, so the composite's "anything near?" test missed a thinned crack there: 2 px gaps, a quad wide
+const PAD = 32;
 const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 0.3, 0], outline: [1, 0.4, 0.4, 1.5] }; // [mode, k, t, o]
 const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(k) ? +qs.get(k) : d);
 // inline: no separate mask target and no depth texture, so the bridge's MSAA depth needs no resolve (ANGLE's D3D11 resolves
@@ -173,11 +177,11 @@ const post = POST && (() => {
     logFar: { value: 1 }, pxPerM: { value: 1 }, sprite: { value: 1.5 * knob('dmvox', 0.005) }, minPx: { value: 2.5 },
     kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, outPx: { value: knob('dmo', look[3]) },
     outRef: { value: knob('dmor', 6) } };
-  const vertexShader = 'varying vec2 vUv;\nvoid main() { vUv = position.xy * 0.5 + 0.5; gl_Position = vec4( position.xy, 0.0, 1.0 ); }';
+  const vertexShader = 'void main() { gl_Position = vec4( position.xy, 0.0, 1.0 ); }';
   const fragmentShader = `
 uniform sampler2D tScene, tMask, tDepth, tSize;
 uniform float opacity, logFar, pxPerM, sprite, minPx, kSig, thr, outPx, outRef;
-varying vec2 vUv;
+vec2 vUv; // this pixel in the targets' uv (they are padded: see PAD)
 vec3 srgb( vec3 c ) { return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) ) - 0.055, step( 0.0031308, c ) ); }
 // the mip level whose B-spline blurs by kSig sprite sizes; the sprite's size in px from the view depth (log depth buffer)
 float lv( float spx ) { return max( 0.0, log2( kSig * spx / 0.65 ) - LOFF ); } // LOFF: the mask's level 0 is level LOFF of the screen
@@ -206,6 +210,7 @@ vec4 bspline( float lod ) { // cubic B-spline of mip level lod: 4 bilinear taps
 }
 void main() {
   ivec2 px = ivec2( gl_FragCoord.xy );
+  vUv = gl_FragCoord.xy / vec2( textureSize( tScene, 0 ) );
 #ifdef SCENE_SRGB
   vec3 base = texelFetch( tScene, px, 0 ).rgb;
 #else
@@ -256,7 +261,8 @@ void main() {
 // LOD (POST; ?dmlod=0: off): a find's points are reordered coarse to fine (one per cell of 64, 32, ... 2 voxels, then the
 // rest), so any prefix is an even subsample; each frame a find draws only the prefix whose spacing stays under LOD_PX px
 // at its nearest depth. Far away its sprites overlap many times anyway, and the mask shows coverage, not count.
-// Thinned cracks (below) draw a band of a crack's points; then that band is ordered coarse to fine on its own (an index).
+// Thinned cracks (below) draw a band of a crack's points; then that band is ordered coarse to fine on its own (an index),
+// with a finer limit (?dmlodpx= ?dmlodband= tune them).
 const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LOD_BAND = knob('dmlodband', 0.35), LV = 6;
 function c2f(a, ids, v, b) { // the points ids (of xyz a, box b, voxel v) coarse to fine: {order, ends[k]: points up to level k, s[k]: its cell}
   const n = ids.length, done = new Uint8Array(n), picked = [], ends = [], s = [];
@@ -315,7 +321,11 @@ function dbScene() { gl.drawBuffers(DB.scene); }
 if (post) lod.renderFrame = () => {
   const { scene, mask, U, quad } = post, cam = lod.camera, ca = R.getClearAlpha();
   R.getDrawingBufferSize(dbs);
-  if (dbs.x !== scene.width || dbs.y !== scene.height) { scene.setSize(dbs.x, dbs.y); mask?.setSize(HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y); }
+  if (dbs.x !== post.w || dbs.y !== post.h) { // PAD: the targets padded to a multiple of 32 px, the picture in their corner
+    const w = Math.ceil(dbs.x / PAD) * PAD, h = Math.ceil(dbs.y / PAD) * PAD;
+    post.w = dbs.x; post.h = dbs.y; scene.setSize(w, h); scene.viewport.set(0, 0, dbs.x, dbs.y);
+    mask?.setSize(HALF ? w / 2 : w, HALF ? h / 2 : h); mask?.viewport.set(0, 0, HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y);
+  }
   R.info.autoReset = false; R.info.reset(); // the HUD's calls / points: all passes
   root.updateMatrixWorld(); // for inView (the scene's render would do it, after the test)
   if (INLINE) return inlineFrame(cam, ca);
