@@ -144,7 +144,9 @@ const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); 
 // the scene with the slider's opacity, so overlapping sprites cannot add up. Smoothing: per pixel, the mask's mip level
 // whose B-spline (4 bilinear taps) blurs by ~k sprite sizes (the sprites write their size into the mask), thresholded at t
 // with a 1 px antialiased edge: round corners instead of squares, gaps narrower than the blur filled; an outline of o px.
-// ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmo= ?dmvz= ?dmsamples= ?dmhalf= (a half-size mask, not inline) tune it.
+// Around the smallest sprites (far away; a thinned crack is a line one sprite wide) the threshold is 0.05 higher, so a
+// line keeps its width (0.4: ~1.25 x its raw coverage, 0.45: ~1.15 x; 0.5 started to drop faint bits)
+// ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmts= ?dmo= ?dmvz= ?dmsamples= ?dmhalf= (a half-size mask, not inline) tune it.
 const R = lod.renderer, POST = !!lod.post && !!R;
 // PAD: every mip level the composite reads (up to 5: 32 px) halves the mask exactly. An odd size halves unevenly (1080 rows:
 // 135 at level 3, then 67): ANGLE's D3D11 mips then sample a 2-texel footprint of 2.01 and a thin line fades out of levels
@@ -175,12 +177,12 @@ const post = POST && (() => {
   const U = { tScene: { value: scene.texture }, tMask: { value: mt }, tDepth: { value: depth }, opacity: { value: 0.8 },
     tSize: { value: SIZE ? mask.textures[1] : mt },
     logFar: { value: 1 }, pxPerM: { value: 1 }, sprite: { value: 1.5 * knob('dmvox', 0.005) }, minPx: { value: 2.5 },
-    kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, outPx: { value: knob('dmo', look[3]) },
+    kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, thrS: { value: knob('dmts', knob('dmt', look[2]) + 0.05) }, outPx: { value: knob('dmo', look[3]) },
     outRef: { value: knob('dmor', 6) } };
   const vertexShader = 'void main() { gl_Position = vec4( position.xy, 0.0, 1.0 ); }';
   const fragmentShader = `
 uniform sampler2D tScene, tMask, tDepth, tSize;
-uniform float opacity, logFar, pxPerM, sprite, minPx, kSig, thr, outPx, outRef;
+uniform float opacity, logFar, pxPerM, sprite, minPx, kSig, thr, thrS, outPx, outRef;
 vec2 vUv; // this pixel in the targets' uv (they are padded: see PAD)
 vec3 srgb( vec3 c ) { return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) ) - 0.055, step( 0.0031308, c ) ); }
 // the mip level whose B-spline blurs by kSig sprite sizes; the sprite's size in px from the view depth (log depth buffer)
@@ -237,7 +239,8 @@ void main() {
 #endif
   float L0 = floor( L );
   vec4 m = mix( bspline( L0 ), bspline( L0 + 1.0 ), L - L0 );
-  float B = cov( m ), sd = ( B - thr ) / max( fwidth( B ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
+  float t = mix( thrS, thr, clamp( ( spx - minPx ) / ( outRef - minPx ), 0.0, 1.0 ) ); // thrS: around the smallest sprites
+  float B = cov( m ), sd = ( B - t ) / max( fwidth( B ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
   vec3 col = srgb( m.rgb / max( B, 1e-3 ) ), o = mix( base, col, opacity * inner );
   float ow = outPx * clamp( spx / outRef, 0.4, 1.0 ); // thinner around small sprites (far away), which it would drown
   if ( ow > 0.0 ) o = mix( o, col * 0.3, min( 1.0, opacity + 0.2 ) * ( clamp( sd + ow + 0.5, 0.0, 1.0 ) - inner ) );
