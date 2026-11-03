@@ -27,9 +27,10 @@ The build is resumable, and takes about 30 min and up to ~12 GB RAM for the 50 M
 
 `viewer.html` is three.js + 3d-tiles-renderer from jsDelivr (needs internet), with no build step.
 Controls: drag to orbit, right/shift-drag to pan, wheel to zoom to the cursor, double-click to set the
-pivot, `F` to fit; on a phone or tablet: drag to orbit, pinch to zoom, two-finger drag to pan, double-tap to set the
+pivot, `F` to fit, `R` to make a drag zoom instead of orbit (up = closer, toward where the drag started; `R` again
+orbits); on a phone or tablet: drag to orbit, pinch to zoom, two-finger drag to pan, double-tap to set the
 pivot. The dock at the bottom: Slojevi (damage classes, opacity), Prepoznaj oštećenja (selective inference),
-Prikaži cijeli most (fit), Tehnički prikaz (the developer HUD: fps, tiles, LOD sliders; hidden by default).
+Prikaži cijeli most (fit), Zumiranje povlačenjem (`R`, also on a phone: one finger zooms), Tehnički prikaz (the developer HUD: fps, tiles, LOD sliders; hidden by default).
 URL params: `?tileset=`, `?lru=<MB>` (default 3072, 512 on touch devices), `?uncapped` (render as fast as the GPU
 finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
 `?damage=<dir>` (default `out/damage/`), `?found=<dir>` (default `out/found/`), `?title=` (the structure's name in the title pill). On touch devices the LOD error target

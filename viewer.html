@@ -24,6 +24,7 @@ body{background:var(--ink0);color:var(--t);font:400 13px/1.4 var(--font-sans);-w
 .num{font-variant-numeric:tabular-nums;white-space:nowrap}
 .cap{font:700 11px var(--font-display);letter-spacing:.16em;text-transform:uppercase;color:var(--t-off)}
 [hidden]{display:none!important}
+canvas.dragzoom{cursor:ns-resize}
 canvas{display:block;width:100%;height:100%;outline:none;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;-webkit-tap-highlight-color:transparent}
 /* floating chrome: solid cards 16 px from the edges (plus the notch), never translucent */
 #title,#dock,#hint,#hud,#err{position:fixed;box-sizing:border-box;background:var(--ink1);border:1px solid var(--line);box-shadow:var(--fp-shadow)}
@@ -187,7 +188,7 @@ function setPivotAt(e) {
 }
 // pointers on the canvas: one drags (orbit; mouse right/middle/shift: pan), two pinch-zoom toward their midpoint and pan.
 // Nothing here stops events: selinf.js and damage.js listen on the same canvas.
-const ptrs = new Map(); let drag = null, pinch = null, tap = null, mouse = true;
+const ptrs = new Map(); let drag = null, pinch = null, tap = null, mouse = true, dragZoom = false; // dragZoom: R
 const mid = () => { const [a, b] = ptrs.values(); return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, d: Math.max(1, Math.hypot(a.x - b.x, a.y - b.y)) }; };
 function regrip() { // the fingers changed: carry on from where they are now, so nothing jumps
   if (ptrs.size < 2) { pinch = null; return; }
@@ -201,7 +202,11 @@ el.addEventListener('pointerdown', (e) => {
   el.setPointerCapture(e.pointerId); mouse = e.pointerType === 'mouse';
   if (e.isPrimary) ptrs.clear(); // a new gesture: drop fingers whose pointerup got lost
   ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, moved: mouse });
-  if (ptrs.size === 1) drag = { pan: e.button === 2 || e.button === 1 || e.shiftKey, multi: false };
+  if (ptrs.size === 1) {
+    drag = { pan: e.button === 2 || e.button === 1 || e.shiftKey, multi: false };
+    // drag-to-zoom: toward what is under the pointer where the drag starts (pick() once, as for a pinch)
+    if (dragZoom && !drag.pan) { const ndc = ndcOf(e); drag.zoom = { ndc, hd: pick(ndc)?.distance ?? camera.position.distanceTo(pivot) }; }
+  }
   regrip();
 });
 el.addEventListener('pointermove', (e) => {
@@ -214,6 +219,7 @@ el.addEventListener('pointermove', (e) => {
     m.hd = pinch.hd * f; pinch = m;
   } else if (!p.moved) return;
   else if (drag.pan) pan(dx, dy);
+  else if (drag.zoom) { const f = Math.exp(dy * 0.005); zoomAt(drag.zoom.ndc, f, drag.zoom.hd); drag.zoom.hd *= f; } // up = closer
   else orbit(dx, dy);
   lookAtPivot();
 });
@@ -240,7 +246,12 @@ el.addEventListener('wheel', (e) => {
 }, { passive: false });
 // iOS page pinch-zoom outside the canvas (HUD, panels). Touch only: desktop Safari's trackpad pinch stays as it was
 if (TOUCH) for (const t of ['gesturestart', 'gesturechange']) document.addEventListener(t, (e) => e.preventDefault());
-addEventListener('keydown', (e) => { if (e.target.tagName !== 'INPUT' && e.key.toLowerCase() === 'f') fit(); });
+addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  const k = e.key.toLowerCase();
+  if (k === 'f') fit();
+  else if (k === 'r' && !e.repeat && !e.metaKey && !e.ctrlKey && !e.altKey) setDragZoom(!dragZoom); // ⌘R / Ctrl+R reload
+});
 addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
 
 function fit() {
@@ -304,8 +315,18 @@ const ui = {
   },
 };
 const ICON = { fit: '<path d="M3 7.5V3h4.5M12.5 3H17v4.5M17 12.5V17h-4.5M7.5 17H3v-4.5"/>',
-  gauge: '<path d="M3.5 15a7.5 7.5 0 1 1 13 0"/><path d="M10 11.3l3.3-3.8"/>' };
+  gauge: '<path d="M3.5 15a7.5 7.5 0 1 1 13 0"/><path d="M10 11.3l3.3-3.8"/>',
+  zoom: '<circle cx="8.5" cy="8.5" r="5.5"/><path d="M12.5 12.5L17 17M8.5 6v5M6 8.5h5"/>' };
 ui.tool({ label: 'Prikaži cijeli most', icon: ICON.fit, order: 30, sep: true, onClick: () => fit() }).title += ' (F)';
+// R or its dock tool: a one-pointer drag zooms instead of orbiting (up = closer); right/shift-drag still pans
+const zoomTool = ui.tool({ label: 'Zumiranje povlačenjem', icon: ICON.zoom, order: 35, onClick: () => setDragZoom(!dragZoom) });
+zoomTool.title += ' (R)';
+let zoomHint = null;
+function setDragZoom(on) {
+  dragZoom = on; zoomTool.classList.toggle('on', on); zoomTool.setAttribute('aria-pressed', on);
+  el.classList.toggle('dragzoom', on); // a class, not style.cursor: selinf.js sets and clears that while armed
+  if (on) zoomHint = ui.hint('Povuci gore za približavanje, dolje za udaljavanje', 3000); else zoomHint?.();
+}
 
 // ---------- dev HUD ----------
 // hidden (no numbers on the chrome) unless its dock tool, ?debug or ?uncapped (the owner reads fps there) shows it
@@ -339,7 +360,7 @@ addToggle('freeze LOD', (on) => (S.frozen = on));
 const uncapped = addToggle('uncapped fps (GPU-paced)', (on) => setUncapped(on));
 const help = document.createElement('div'); help.className = 'help';
 help.textContent = TOUCH ? 'drag orbit | pinch zoom | 2-finger pan | double-tap pivot | tap damage'
-  : 'drag orbit | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit';
+  : 'drag orbit (R: drag zooms, up = in) | right/shift-drag pan | wheel zoom@cursor | dbl-click pivot | F fit';
 ctl.append(help);
 
 const maxAniso = renderer.capabilities.getMaxAnisotropy(); // grazing views of the deck stay sharp
