@@ -108,7 +108,10 @@ const LRU_MB = Math.min(LRU_MAX_MB, Math.max(64, +params.get('lru') || (TOUCH ? 
 const src2w = (p) => new THREE.Vector3(p[0], p[2], -p[1]);
 const w2src = (v) => [v.x, -v.z, v.y];
 
-const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, powerPreference: 'high-performance' });
+// damage.js draws the damage as a screen-space mask (lod.renderFrame): the scene goes into its MSAA target, whose depth
+// hides the damage behind the bridge, so the canvas itself needs neither MSAA nor depth. ?dmpost=0: the old path
+const POST = params.get('dmpost') !== '0';
+const renderer = new THREE.WebGLRenderer({ antialias: !POST, depth: !POST, logarithmicDepthBuffer: true, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.setClearColor(0x0c0c0d); // = --ink0
@@ -383,7 +386,7 @@ function frame() {
   camera.updateMatrixWorld();
   tiles.setResolutionFromRenderer(camera, renderer);
   if (!S.frozen) tiles.update();
-  renderer.render(scene, camera);
+  if (window.lod.renderFrame) window.lod.renderFrame(); else renderer.render(scene, camera); // damage.js's passes, or the plain scene
   if (now - winT < 250) return; // HUD: frames actually rendered in the last window, and its slowest frame
   fps = (frames * 1000) / (now - winT); frameMs = (now - winT) / frames; worstMs = worst; frames = worst = 0; winT = now;
   if (!statsEl.offsetParent) return; // HUD hidden: skip its sliders and the walk over every loaded tile
@@ -423,7 +426,7 @@ const ready = new Promise((resolve, reject) => {
   tiles.addEventListener('load-error', (e) => console.warn('[tiles] load-error', e.url, e.error?.message));
   setTimeout(() => reject(new Error('tileset did not load in 30 s: ' + TILESET)), 30000);
 });
-window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl, ui };
+window.lod = { tiles, camera, stats, setView, ready, scene, el, pick, ndcOf, src2w, w2src, ctl, ui, renderer, post: POST };
 </script>
 <!-- ?v=: new urls, so a tab restored from an old cache cannot pair this page with old scripts -->
 <script type="module" src="selinf.js?v=2"></script>

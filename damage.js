@@ -100,19 +100,146 @@ root.rotation.x = -Math.PI / 2; lod.scene.add(root);
 
 // Points size in world units (P[1][1] = 1/tan(fov/2), mvPosition includes the app points' box scale) so cracks look solid up
 // close, with a floor in device px so far ones don't vanish. The depth pull (1 % of view depth) keeps coarser LOD tiles from hiding them.
+// VERTEX_DEPTH: a sprite faces the screen, so its log depth is one value: set it per vertex and leave gl_FragDepth alone,
+// which lets the GPU reject hidden sprite pixels before shading them (early z)
 function patch(s) {
   s.vertexShader = s.vertexShader
     .replace('gl_PointSize *= ( scale / - mvPosition.z );', 'gl_PointSize = max( MIN_PX, size * projectionMatrix[ 1 ][ 1 ] * scale / - mvPosition.z );')
+    .replace('#include <logdepthbuf_pars_vertex>', '#include <logdepthbuf_pars_vertex>\n#if defined( USE_LOGARITHMIC_DEPTH_BUFFER ) && defined( VERTEX_DEPTH )\n' +
+      'uniform float logDepthBufFC;\n#endif')
     .replace('#include <logdepthbuf_vertex>', '#include <logdepthbuf_vertex>\n#ifdef USE_LOGARITHMIC_DEPTH_BUFFER\n' +
-      'vFragDepth = 1.0 + gl_Position.w * 0.99;\n#endif');
+      'vFragDepth = 1.0 + gl_Position.w * 0.99;\n#ifdef VERTEX_DEPTH\n' +
+      'gl_Position.z = ( log2( max( vFragDepth, 1e-6 ) ) * logDepthBufFC - 1.0 ) * gl_Position.w;\n#endif\n#endif\n' +
+      '#ifdef SIZE_OUT\nvSz = log2( max( gl_PointSize, 1.0 ) ) * 0.125;\n#endif\n#ifdef HALF_RES\ngl_PointSize *= 0.5;\n#endif')
+    .replace('void main() {', '#ifdef SIZE_OUT\nvarying float vSz;\n#endif\nvoid main() {');
+  if ('VERTEX_DEPTH' in this.defines) s.fragmentShader = s.fragmentShader.replace('#include <logdepthbuf_fragment>', '');
+  // SIZE_OUT: the mask's 2nd target gets the sprite's size, log2(px) / 8, for the composite's blur
+  s.fragmentShader = s.fragmentShader.replace('void main() {', '#ifdef SIZE_OUT\nlayout( location = 1 ) out highp vec4 pc_fragSize;\n' +
+    'varying float vSz;\n#endif\nvoid main() {').replace('#include <premultiplied_alpha_fragment>', '#include <premultiplied_alpha_fragment>\n#ifdef SIZE_OUT\n' +
+    'pc_fragSize = vec4( vSz, 0.0, 0.0, 1.0 );\n#endif');
+  // HALF_RES: a half-size mask has no depth buffer of the bridge's size: test against its depth texture here
+  if ('HALF_RES' in this.defines) {
+    s.uniforms.tBridge = post.U.tDepth;
+    s.fragmentShader = s.fragmentShader.replace('void main() {', 'uniform highp sampler2D tBridge;\nvoid main() {\n' +
+      'if ( gl_FragCoord.z > texelFetch( tBridge, min( ivec2( gl_FragCoord.xy * 2.0 ), textureSize( tBridge, 0 ) - 1 ), 0 ).r ) discard;');
+  }
 }
-function mat(color, size, minPx, opts) {
+function mat(color, size, minPx, opts, defs = {}) {
   const m = new THREE.PointsMaterial({ color, size, ...opts });
-  m.defines = { MIN_PX: minPx.toFixed(1) }; // part of the program key: one program per floor, same patch
+  m.defines = { MIN_PX: minPx.toFixed(1), ...defs }; // part of the program key: one program per floor, same patch
   m.onBeforeCompile = patch;
   return m;
 }
 const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); // transparent: drawn after (over) the class points
+
+// ---------- the look: an opaque screen-space mask, laid over the scene once (?dmpost=0: the old blended sprites) ----------
+// The scene renders into an MSAA target (colour + depth texture); the class points draw OPAQUE (class colour, coverage 1)
+// into a mask that shares the resolved depth (the bridge hides them), with mips. One full-screen pass then lays the mask
+// over the scene with the slider's opacity: overlapping sprites cannot add up. Smoothing: per pixel, the mask's mip level
+// whose B-spline (4 bilinear taps) blurs by ~k sprite sizes (the sprite's size there follows from the depth), thresholded
+// at t with a 1 px antialiased edge: round corners instead of squares, gaps narrower than the blur filled; an outline of
+// o px. ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmo= ?dmvox= ?dmvz= ?dmsamples= override the knobs.
+const R = lod.renderer, POST = !!lod.post && !!R;
+const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 0.3, 0], outline: [1, 0.5, 0.3, 1.5] };
+const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(k) ? +qs.get(k) : d);
+const MODE = knob('dmmode', look[0]), SIZE = POST && MODE === 1 && knob('dmsize', 1), HALF = POST && knob('dmhalf', 0);
+const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}) }; // the class points' defines
+const over = new THREE.Group(); // POST: the selected damage, drawn over the composite
+over.rotation.x = -Math.PI / 2; over.visible = false; lod.scene.add(over);
+const post = POST && (() => {
+  const depth = new THREE.DepthTexture(1, 1); depth.type = THREE.UnsignedIntType; // DEPTH_COMPONENT24, shared by both
+  const scene = new THREE.WebGLRenderTarget(1, 1, { samples: knob('dmsamples', 4), depthTexture: depth, colorSpace: THREE.SRGBColorSpace });
+  const mask = new THREE.WebGLRenderTarget(1, 1, { depthTexture: HALF ? null : depth, depthBuffer: !HALF, generateMipmaps: true,
+    minFilter: THREE.LinearMipmapLinearFilter, count: SIZE ? 2 : 1 });
+  if (SIZE) mask.textures[1].format = THREE.RedFormat;
+  const U = { tScene: { value: scene.texture }, tMask: { value: mask.texture }, tDepth: { value: depth }, opacity: { value: 0.8 },
+    tSize: { value: mask.textures[SIZE ? 1 : 0] },
+    logFar: { value: 1 }, pxPerM: { value: 1 }, sprite: { value: 1.5 * knob('dmvox', 0.005) }, minPx: { value: 2.5 },
+    kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, outPx: { value: knob('dmo', look[3]) } };
+  const vertexShader = 'varying vec2 vUv;\nvoid main() { vUv = position.xy * 0.5 + 0.5; gl_Position = vec4( position.xy, 0.0, 1.0 ); }';
+  const fragmentShader = `
+uniform sampler2D tScene, tMask, tDepth, tSize;
+uniform float opacity, logFar, pxPerM, sprite, minPx, kSig, thr, outPx;
+varying vec2 vUv;
+vec3 srgb( vec3 c ) { return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) ) - 0.055, step( 0.0031308, c ) ); }
+// the mip level whose B-spline blurs by kSig sprite sizes; the sprite's size in px from the view depth (log depth buffer)
+float lv( float spx ) { return max( 0.0, log2( kSig * spx / 0.65 ) - LOFF ); } // LOFF: the mask's level 0 is level LOFF of the screen
+float level( float d ) { return lv( max( minPx, sprite * pxPerM / ( exp2( d * logFar ) - 1.0 ) ) ); }
+vec4 cubicW( float v ) {
+  vec4 n = vec4( 1.0, 2.0, 3.0, 4.0 ) - v, s = n * n * n;
+  float x = s.x, y = s.y - 4.0 * s.x, z = s.z - 4.0 * s.y + 6.0 * s.x;
+  return vec4( x, y, z, 6.0 - x - y - z ) / 6.0;
+}
+vec4 bspline( float lod ) { // cubic B-spline of mip level lod: 4 bilinear taps
+  vec2 ts = vec2( textureSize( tMask, int( lod ) ) ), tc = vUv * ts - 0.5, f = fract( tc );
+  tc -= f;
+  vec4 xc = cubicW( f.x ), yc = cubicW( f.y ), c = tc.xxyy + vec2( -0.5, 1.5 ).xyxy;
+  vec4 s = vec4( xc.xz + xc.yw, yc.xz + yc.yw ), o = ( c + vec4( xc.yw, yc.yw ) / s ) / ts.xxyy;
+  vec4 s0 = textureLod( tMask, o.xz, lod ), s1 = textureLod( tMask, o.yz, lod ), s2 = textureLod( tMask, o.xw, lod ), s3 = textureLod( tMask, o.yw, lod );
+  float sx = s.x / ( s.x + s.y ), sy = s.z / ( s.z + s.w );
+  return mix( mix( s3, s2, sx ), mix( s1, s0, sx ), sy );
+}
+void main() {
+  ivec2 px = ivec2( gl_FragCoord.xy );
+  vec3 base = srgb( texelFetch( tScene, px, 0 ).rgb );
+#if MODE == 1
+  // nothing near this 2x2 quad: the scene. One decision per quad, so fwidth() below sees all 4 pixels
+  vec2 q = ( floor( gl_FragCoord.xy * 0.5 ) * 2.0 + 1.0 ) / vec2( textureSize( tScene, 0 ) );
+  if ( textureLod( tMask, q, level( textureLod( tDepth, q, 0.0 ).r ) + 2.0 ).a < 0.5 / 255.0 ) { gl_FragColor = vec4( base, 1.0 ); return; }
+  float L = level( texelFetch( tDepth, px, 0 ).r );
+#ifdef SIZE_IN
+  // the sprites' own size around here (their mean log2 px, coverage-weighted, from the size target two levels up)
+  float pa = textureLod( tMask, vUv, L + 2.0 ).a;
+  if ( pa > 2.0 / 255.0 ) L = lv( exp2( 8.0 * textureLod( tSize, vUv, L + 2.0 ).r / pa ) );
+#endif
+  float L0 = floor( L );
+  vec4 m = mix( bspline( L0 ), bspline( L0 + 1.0 ), L - L0 );
+  float sd = ( m.a - thr ) / max( fwidth( m.a ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
+  vec3 col = srgb( m.rgb / max( m.a, 1e-3 ) ), o = mix( base, col, opacity * inner );
+  if ( outPx > 0.0 ) o = mix( o, col * 0.3, min( 1.0, opacity + 0.2 ) * ( clamp( sd + outPx + 0.5, 0.0, 1.0 ) - inner ) );
+  gl_FragColor = vec4( o, 1.0 );
+#elif MODE == 0
+  vec4 m = texelFetch( tMask, px >> int( LOFF ), 0 );
+  gl_FragColor = vec4( mix( base, srgb( m.rgb / max( m.a, 1e-3 ) ), opacity * m.a ), 1.0 );
+#else
+  gl_FragColor = vec4( base, 1.0 );
+#endif
+}`;
+  const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', ...(SIZE ? { SIZE_IN: '' } : {}) },
+    depthTest: false, depthWrite: false });
+  const shade = sm(MODE), copy = sm(-1), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), shade), cam = new THREE.OrthographicCamera();
+  quad.frustumCulled = false;
+  return { scene, mask, U, shade, copy, quad, cam };
+})();
+// the frame (viewer.html's loop and bench.py both call lod.renderFrame): the scene without the damage into post.scene, the
+// damage into the mask (only when some is in view), the composite onto the canvas, the selected damage over it
+const fr = new THREE.Frustum(), pv = new THREE.Matrix4(), dbs = new THREE.Vector2(), clear = new THREE.Color();
+function inView(cam) {
+  pv.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse); fr.setFromProjectionMatrix(pv);
+  for (const c of C) if (c.on) for (const p of c.g.children) if (fr.intersectsObject(p)) return true;
+  return false;
+}
+if (post) lod.renderFrame = () => {
+  const { scene, mask, U, quad } = post, cam = lod.camera, ca = R.getClearAlpha();
+  R.getDrawingBufferSize(dbs);
+  if (dbs.x !== scene.width || dbs.y !== scene.height) { scene.setSize(dbs.x, dbs.y); mask.setSize(HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y); }
+  R.info.autoReset = false; R.info.reset(); // the HUD's calls / points: all passes
+  root.visible = false;
+  R.setRenderTarget(scene); R.render(lod.scene, cam);
+  root.visible = true;
+  const any = inView(cam);
+  R.autoClear = false;
+  if (any) {
+    R.getClearColor(clear); R.setRenderTarget(mask); R.setClearColor(0, 0); R.clear(true, false, false);
+    R.render(root, cam);
+    R.setClearColor(clear, ca);
+    U.logFar.value = Math.log2(cam.far + 1); U.pxPerM.value = (cam.projectionMatrix.elements[5] * dbs.y) / 2;
+  }
+  quad.material = any ? post.shade : post.copy;
+  R.setRenderTarget(null); R.render(quad, post.cam);
+  if (selPts) { over.visible = true; R.render(over, cam); over.visible = false; }
+  R.autoClear = true;
+};
 
 // C: the classes ({name, color, voxel, measure, items + total: the app's, g: its group, mat}); app, finds: the two kinds of
 // damage ({c, n, m, b, p: [[photo name, box]], img, title, tid}; the app's: s = its run in Q, a find's: xyz = its floats)
@@ -137,7 +264,7 @@ Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
 sl.setAttribute('aria-label', 'Neprozirnost oštećenja');
 sl.oninput = () => {
   opacity = sl.value / 100; val.textContent = pct(opacity); sl.style.setProperty('--p', opacity); // --p: the blue fill
-  for (const c of C) c.mat.opacity = opacity;
+  if (post) post.U.opacity.value = opacity; else for (const c of C) c.mat.opacity = opacity;
 };
 sl.oninput(); lab.append('Neprozirnost oštećenja', val);
 ph.append(h('span', 'cap', 'Klase oštećenja'), px); pop.append(ph, msg, rows, lab, sl, ar); document.body.append(pop);
@@ -163,7 +290,9 @@ function klass(name, o) { // the class called name, made on first use: the palet
   if (c) return c;
   const crack = name === 'Crack', r = h('div', 'dm-row'), eye = btn('dm-eye', ''); // the whole row toggles; the eye is its button
   c = { name, color: CL[name]?.[1] ?? '#828A92', voxel: crack ? 0.005 : 0.01, measure: crack ? 'length' : 'area', items: 0, total: 0, ...o, g: new THREE.Group(), row: r };
-  c.mat = mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { transparent: true, opacity, depthWrite: false }); // both kinds share it
+  c.mat = POST ? mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { depthWrite: false }, VZ) // opaque, into the mask; both kinds share it
+    : mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { transparent: true, opacity, depthWrite: false });
+  c.g.renderOrder = crack ? 1 : 0; // POST: the last write wins, cracks over the areas they cross
   r.append(swatch(c.color), h('span', 'dm-nm', hr(c)), (c.ct = h('span', 'num dm-ct')), (c.tot = h('span', 'num dm-tot')), eye);
   c.show = (v) => { // hidden: both kinds, hollow swatch, --t-off text, eye-off
     c.on = c.g.visible = v; r.classList.toggle('off', !v); eye.innerHTML = svg(v ? EYE : EYE + '<path d="M3 3l18 18"/>');
@@ -310,14 +439,14 @@ lod.el.addEventListener('pointerup', (e) => {
 
 function select(it) {
   if (it === sel) return; // e.g. the double-click/tap that sets the pivot: keep the panel and its scroll
-  if (selPts) { root.remove(selPts); selPts.geometry.dispose(); selPts = null; }
+  if (selPts) { selPts.parent.remove(selPts); selPts.geometry.dispose(); selPts = null; }
   sel = it;
   closeView();
   if (!it) return void (panel.style.display = 'none');
   selMat.size = 2.5 * (it.c.voxel || 0.01);
   selPts = itemPts(it, selMat);
   selPts.renderOrder = 999;
-  root.add(selPts);
+  (post ? over : root).add(selPts);
   showPanel(it, it.c);
 }
 
