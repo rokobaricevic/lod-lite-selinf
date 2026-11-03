@@ -138,19 +138,19 @@ function mat(color, size, minPx, opts, defs = {}) {
 const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); // transparent: drawn after (over) the class points
 
 // ---------- the look: an opaque screen-space mask, laid over the scene once (?dmpost=0: the old blended sprites) ----------
-// The scene renders into an MSAA target (colour + depth texture); the class points draw OPAQUE (class colour, coverage 1)
-// into a mask that shares the resolved depth (the bridge hides them), with mips. One full-screen pass then lays the mask
-// over the scene with the slider's opacity: overlapping sprites cannot add up. Smoothing: per pixel, the mask's mip level
-// whose B-spline (4 bilinear taps) blurs by ~k sprite sizes (the sprite's size there follows from the depth), thresholded
-// at t with a 1 px antialiased edge: round corners instead of squares, gaps narrower than the blur filled; an outline of
-// o px. ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmo= ?dmvox= ?dmvz= ?dmsamples= override the knobs.
+// The scene renders into an MSAA target. The class points draw OPAQUE (one write per sample) into a mask, depth-tested
+// against the bridge: by default (inline) a 2nd attachment of that target, drawn in the same pass after the bridge; with
+// ?dminline=0 a separate target sharing the scene's resolved depth texture. One full-screen pass then lays the mask over
+// the scene with the slider's opacity, so overlapping sprites cannot add up. Smoothing: per pixel, the mask's mip level
+// whose B-spline (4 bilinear taps) blurs by ~k sprite sizes (the sprites write their size into the mask), thresholded at t
+// with a 1 px antialiased edge: round corners instead of squares, gaps narrower than the blur filled; an outline of o px.
+// ?dmlook=plain|smooth|fill|outline, ?dmk= ?dmt= ?dmo= ?dmvz= ?dmsamples= ?dmhalf= (a half-size mask, not inline) tune it.
 const R = lod.renderer, POST = !!lod.post && !!R;
 const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 0.3, 0], outline: [1, 0.4, 0.4, 1.5] }; // [mode, k, t, o]
 const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(k) ? +qs.get(k) : d);
-// ?dminline=1: no separate mask target and no depth texture: the points draw, in the scene pass itself, into a 2nd MSAA
-// attachment of the scene target (packed: colour + size code), so the bridge's MSAA depth needs no resolve (ANGLE's D3D11
-// resolves depth with a shader pass: 3.6 ms at 1080p on the Intel iGPU)
-const MODE = knob('dmmode', look[0]), INLINE = POST && knob('dminline', 0), LIN = knob('dmlin', 0);
+// inline: no separate mask target and no depth texture, so the bridge's MSAA depth needs no resolve (ANGLE's D3D11 resolves
+// depth with a shader pass: 3.6 ms at 1080p on the Intel iGPU, against 0.9 ms for the colour); the mask is packed (colour + size)
+const MODE = knob('dmmode', look[0]), INLINE = POST && !!knob('dminline', 1) && !knob('dmhalf', 0), LIN = knob('dmlin', 0);
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1), HALF = POST && !INLINE && knob('dmhalf', 0);
 const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines

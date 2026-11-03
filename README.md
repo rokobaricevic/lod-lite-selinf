@@ -56,6 +56,13 @@ In the viewer: Slojevi has one toggle per class (with its count and total) and t
 damage: the inspector (a bottom sheet on a phone) shows its class, length or area and photos; a photo opens full
 screen with a filmstrip of the others (← → or swipe, Esc closes).
 
+How the damage is drawn (`damage.js`): the scene renders into an MSAA target; the damage points draw opaque into a
+mask that shares its depth (the bridge in front hides them), and one full-screen pass lays the mask over the scene
+with the opacity, so overlapping points never add up. That pass blurs the mask by about half a point's size (its mips,
+B-spline filtered) and thresholds it with an antialiased edge: round outlines instead of squares, small gaps filled,
+and a thin dark outline. A find's points are stored coarse to fine, so far away only an even subsample is drawn.
+`?dmpost=0` is the old path (blended squares); `?dmlook=plain|smooth|fill|outline` and `?dmk= ?dmt= ?dmo=` tune it.
+
 What "Prepoznaj oštećenja" finds is saved on the PC (`selinf.py`'s FoundStore, in `out/found/`: `found.json`, one
 float32 `<id>.bin` per find, photo crops) and shown like the app's damage, for everyone, across reloads and
 restarts: its crack length (lynceus's own skeleton length) or area, up to 3 photos picked with the same least-overlap
