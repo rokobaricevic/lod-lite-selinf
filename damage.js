@@ -213,6 +213,42 @@ void main() {
 })();
 // the frame (viewer.html's loop and bench.py both call lod.renderFrame): the scene without the damage into post.scene, the
 // damage into the mask (only when some is in view), the composite onto the canvas, the selected damage over it
+// LOD (POST; ?dmlod=0: off): a find's points are reordered coarse to fine (one per cell of 64, 32, ... 2 voxels, then the
+// rest), so any prefix is an even subsample; each frame a find draws only the prefix whose spacing stays under LOD_PX px
+// at its nearest depth. Far away its sprites overlap many times anyway, and the mask shows coverage, not count.
+const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LV = 6;
+function progressive(it) {
+  const a = it.xyz, n = it.n, v = it.c.voxel || 0.01, b = it.b, lvl = new Uint8Array(n).fill(LV), picked = [], ends = [], s = [];
+  for (let k = 0; k < LV; k++) {
+    const c = v * 2 ** (LV - k), seen = new Set();
+    const key = (j) => Math.floor((a[j] - b[0]) / c) + Math.floor((a[j + 1] - b[1]) / c) * 131072 + Math.floor((a[j + 2] - b[2]) / c) * 17179869184;
+    for (const i of picked) seen.add(key(i * 3));
+    for (let i = 0; i < n; i++) {
+      if (lvl[i] !== LV) continue;
+      const q = key(i * 3);
+      if (!seen.has(q)) { seen.add(q); lvl[i] = k; picked.push(i); }
+    }
+    ends.push(picked.length); s.push(c);
+  }
+  const out = new Float32Array(n * 3);
+  let j = 0;
+  const put = (i) => { out[j++] = a[i * 3]; out[j++] = a[i * 3 + 1]; out[j++] = a[i * 3 + 2]; };
+  for (const i of picked) put(i);
+  for (let i = 0; i < n; i++) if (lvl[i] === LV) put(i);
+  it.xyz = out; it.lod = { ends, s };
+}
+const eye = new THREE.Vector3(), fwd = new THREE.Vector3();
+function lodUpdate(cam, P) { // P: px per metre at depth 1 m
+  const o = lod.w2src(eye.copy(cam.position)), d = lod.w2src(cam.getWorldDirection(fwd));
+  for (const f of finds) {
+    if (!f.lod) continue;
+    const b = f.b;
+    let dmin = Infinity, n = f.n;
+    for (let c = 0; c < 8; c++) dmin = Math.min(dmin, (b[c & 1 ? 3 : 0] - o[0]) * d[0] + (b[c & 2 ? 4 : 1] - o[1]) * d[1] + (b[c & 4 ? 5 : 2] - o[2]) * d[2]);
+    if (dmin > 0) { const k = f.lod.s.findIndex((c) => (c * P) / dmin <= LOD_PX); if (k >= 0) n = f.lod.ends[k]; }
+    f.pts.geometry.setDrawRange(0, n);
+  }
+}
 const fr = new THREE.Frustum(), pv = new THREE.Matrix4(), dbs = new THREE.Vector2(), clear = new THREE.Color();
 function inView(cam) {
   pv.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse); fr.setFromProjectionMatrix(pv);
@@ -230,6 +266,7 @@ if (post) lod.renderFrame = () => {
   const any = inView(cam);
   R.autoClear = false;
   if (any) {
+    if (LOD) lodUpdate(cam, (cam.projectionMatrix.elements[5] * dbs.y) / 2);
     R.getClearColor(clear); R.setRenderTarget(mask); R.setClearColor(0, 0); R.clear(true, false, false);
     R.render(root, cam);
     R.setClearColor(clear, ca);
@@ -348,6 +385,7 @@ async function loadFind(f) {
   if (buf.byteLength !== f.n * 12) throw new Error(`${f.id}.bin: ${buf.byteLength} B, expected ${f.n * 12}`);
   const id = f.id.toUpperCase(), it = { ...f, xyz: new Float32Array(buf), c: klass(f.class, { voxel: f.voxel, measure: f.measure }),
     img: `${FOUND}img/${f.id}_`, title: id, tid: id };
+  if (LOD) progressive(it);
   it.pts = itemPts(it, it.c.mat);
   return it;
 }
