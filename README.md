@@ -52,7 +52,10 @@ crack_lengths.json, points_sources.bin, the photos) into `out/damage/`, static f
 ./test.sh damage        # PC: run damage.py next to the data (~20 s), copy out\damage back into out/ (~80 MB)
 ```
 
-In the viewer: Slojevi has one toggle per class (with its count and total) and the damage opacity. Click or tap a
+In the viewer: Slojevi has one toggle per class (with its count and total), the damage opacity and "Debljina pukotina":
+the segmentation's crack masks are 5-10x wider than the crack, so a crack is drawn as a band of that width along its
+centreline (`thin.js`, in a Worker at load: each point's distance to the centreline of its crack's mask; ?thin=<mm> |
+off sets the half-width, default 2 mm; the points, their measures and picking are unchanged). Click or tap a
 damage: the inspector (a bottom sheet on a phone) shows its class, length or area and photos; a photo opens full
 screen with a filmstrip of the others (← → or swipe, Esc closes).
 
@@ -60,7 +63,8 @@ How the damage is drawn (`damage.js`): the scene renders into an MSAA target; th
 mask that shares its depth (the bridge in front hides them), and one full-screen pass lays the mask over the scene
 with the opacity, so overlapping points never add up. That pass blurs the mask by about half a point's size (its mips,
 B-spline filtered) and thresholds it with an antialiased edge: round outlines instead of squares, small gaps filled,
-and a thin dark outline. A find's points are stored coarse to fine, so far away only an even subsample is drawn.
+and a thin dark outline. A find's points are stored coarse to fine, so far away only an even subsample is drawn (a
+thinned crack's band gets its own coarse-to-fine order, rebuilt when its width changes).
 `?dmpost=0` is the old path (blended squares); `?dmlook=plain|smooth|fill|outline` and `?dmk= ?dmt= ?dmo=` tune it.
 
 What "Prepoznaj oštećenja" finds is saved on the PC (`selinf.py`'s FoundStore, in `out/found/`: `found.json`, one

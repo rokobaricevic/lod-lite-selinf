@@ -88,7 +88,7 @@ const fotografij = (n) => `${n0(n)} fotografij${n % 10 > 1 && n % 10 < 5 && (n %
 
 const status = h('pre'), st = { damage: 'loading...' }; // the dev HUD's English lines
 status.style.cssText = 'margin-top:8px;border-top:1px solid var(--line);padding-top:8px'; lod.ctl.append(status);
-const dev = (k, s) => { st[k] = s; status.textContent = `damage  ${st.damage}\nfound   ${st.found}`; };
+const dev = (k, s) => { st[k] = s; status.textContent = `damage  ${st.damage}\nfound   ${st.found}` + (st.thin ? `\nthin    ${st.thin}` : ''); };
 const LOADING = 'Učitavanje oštećenja…', unhint = ui.hint(LOADING); // clears only while it still shows this hint
 dev('found', 'loading...');
 const say = (text, k, d, ms) => { ui.hint(text, ms); msg.textContent = text; dev(k, d); };
@@ -256,37 +256,47 @@ void main() {
 // LOD (POST; ?dmlod=0: off): a find's points are reordered coarse to fine (one per cell of 64, 32, ... 2 voxels, then the
 // rest), so any prefix is an even subsample; each frame a find draws only the prefix whose spacing stays under LOD_PX px
 // at its nearest depth. Far away its sprites overlap many times anyway, and the mask shows coverage, not count.
-const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LV = 6;
-function progressive(it) {
-  const a = it.xyz, n = it.n, v = it.c.voxel || 0.01, b = it.b, lvl = new Uint8Array(n).fill(LV), picked = [], ends = [], s = [];
+// Thinned cracks (below) draw a band of a crack's points; then that band is ordered coarse to fine on its own (an index).
+const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LOD_BAND = knob('dmlodband', 0.35), LV = 6;
+function c2f(a, ids, v, b) { // the points ids (of xyz a, box b, voxel v) coarse to fine: {order, ends[k]: points up to level k, s[k]: its cell}
+  const n = ids.length, done = new Uint8Array(n), picked = [], ends = [], s = [];
   for (let k = 0; k < LV; k++) {
     const c = v * 2 ** (LV - k), seen = new Set();
     const key = (j) => Math.floor((a[j] - b[0]) / c) + Math.floor((a[j + 1] - b[1]) / c) * 131072 + Math.floor((a[j + 2] - b[2]) / c) * 17179869184;
-    for (const i of picked) seen.add(key(i * 3));
-    for (let i = 0; i < n; i++) {
-      if (lvl[i] !== LV) continue;
-      const q = key(i * 3);
-      if (!seen.has(q)) { seen.add(q); lvl[i] = k; picked.push(i); }
+    for (const i of picked) seen.add(key(ids[i] * 3));
+    for (let i = 0; i < n; i++) { // in ids' order: the first point of a cell stands for it (a band's: the one nearest the centreline)
+      if (done[i]) continue;
+      const q = key(ids[i] * 3);
+      if (!seen.has(q)) { seen.add(q); done[i] = 1; picked.push(i); }
     }
     ends.push(picked.length); s.push(c);
   }
-  const out = new Float32Array(n * 3);
+  const order = new Uint32Array(n);
   let j = 0;
-  const put = (i) => { out[j++] = a[i * 3]; out[j++] = a[i * 3 + 1]; out[j++] = a[i * 3 + 2]; };
-  for (const i of picked) put(i);
-  for (let i = 0; i < n; i++) if (lvl[i] === LV) put(i);
+  for (const i of picked) order[j++] = ids[i];
+  for (let i = 0; i < n; i++) if (!done[i]) order[j++] = ids[i];
+  return { order, ends, s };
+}
+function progressive(it) { // the find's own floats, stored coarse to fine (a permutation: every point stays, picking reads them all)
+  const a = it.xyz, n = it.n, { order, ends, s } = c2f(a, Uint32Array.from({ length: n }, (_, i) => i), it.c.voxel || 0.01, it.b);
+  const out = new Float32Array(n * 3);
+  for (let i = 0, j = 0; i < n; i++, j += 3) { const k = order[i] * 3; out[j] = a[k]; out[j + 1] = a[k + 1]; out[j + 2] = a[k + 2]; }
   it.xyz = out; it.lod = { ends, s };
 }
 const eye = new THREE.Vector3(), fwd = new THREE.Vector3();
 function lodUpdate(cam, P) { // P: px per metre at depth 1 m
   const o = lod.w2src(eye.copy(cam.position)), d = lod.w2src(cam.getWorldDirection(fwd));
   for (const f of finds) {
-    if (!f.lod) continue;
+    const { n, lv } = f.draw ?? { n: f.n, lv: f.lod }; // f.draw: findDraw's (thinned: the band's)
+    if (!lv) continue;
     const b = f.b;
-    let dmin = Infinity, n = f.n;
+    let dmin = Infinity, m = n;
     for (let c = 0; c < 8; c++) dmin = Math.min(dmin, (b[c & 1 ? 3 : 0] - o[0]) * d[0] + (b[c & 2 ? 4 : 1] - o[1]) * d[1] + (b[c & 4 ? 5 : 2] - o[2]) * d[2]);
-    if (dmin > 0) { const k = f.lod.s.findIndex((c) => (c * P) / dmin <= LOD_PX); if (k >= 0) n = f.lod.ends[k]; }
-    f.pts.geometry.setDrawRange(0, n);
+    // a band is a line, one or two points wide: a cell's point may be ~2.5 cells from the next one along it, so its
+    // spacing must stay well under a sprite (LOD_BAND of one; the sprites' floor or their size); an area overlaps anyway
+    const lim = lv.band ? LOD_BAND * Math.max(2.5, (f.c.mat.size * P) / dmin) : LOD_PX;
+    if (dmin > 0) { const k = lv.s.findIndex((c) => (c * P) / dmin <= lim); if (k >= 0) m = lv.ends[k]; }
+    f.pts.geometry.setDrawRange(0, m);
   }
 }
 const fr = new THREE.Frustum(), pv = new THREE.Matrix4(), dbs = new THREE.Vector2(), clear = new THREE.Color();
@@ -363,6 +373,124 @@ function points(arr, m, box, quant) { // quant: the app's normalized uint16 in t
 const itemPts = (it, m) => (it.xyz ? points(it.xyz, m, new THREE.Box3().setFromArray(it.b).expandByScalar(0.001), false) // b: to 1 mm
   : points(new Uint16Array(Q.buffer, it.s * 6, it.n * 3), m, unitBox(it.b), true)); // zero-copy views
 
+// ---------- crack thinning: draw only the core of a crack's mask (the segmentation's is 5-10x wider than the crack) ----------
+// thin.js (in a Worker) gives every crack point t, its distance to the crack's centreline (0.25 mm steps; 0 = the spine,
+// a point every few mm along it, so even the thinnest band is unbroken). A crack's Points get an index of its points
+// ordered by t, and draw the first ones: those within the chosen half-width. With the LOD, a find's band then gets its
+// own coarse-to-fine order (c2f over the band in t order, so a coarse cell keeps the point nearest the centreline),
+// rebuilt when the width changes (the slider: 200 ms after it stops; meanwhile the whole band, in t order).
+// The points, the data, the measures, picking and selection keep every point; only fewer are drawn.
+const TUNIT = 0.25e-3, THIN = [0, 1, 2, 3, 4, 6, 8, 12, 16, 25, Infinity]; // half-widths, mm; Infinity: every point
+const thinQ = qs.get('thin'); // ?thin=<mm> | off
+let thinMm = thinQ == null ? 2 : /^(off|full|no)$/i.test(thinQ) ? Infinity : Math.max(0, +thinQ || 0);
+const thinURL = new URL('thin.js?v=1', import.meta.url), thinWait = new Map(), tstat = { n: 0, pts: 0, ms: 0, sort: 0, band: 0, t0: 0, t1: 0 };
+let thinWorker = null, thinMod = null, thinSeq = 0, bandT = 0;
+const cumK = () => Math.min(255, Math.floor((thinMm * 1e-3) / TUNIT + 1e-6) + 1); // cum[cumK()]: the points with t <= thinMm
+function thinOrder(t, off, n) { // counting sort by t: {idx: an index attribute, cum[k]: how many have t < k}
+  const s = performance.now(), cum = new Uint32Array(257), idx = n < 65536 ? new Uint16Array(n) : new Uint32Array(n);
+  for (let i = 0; i < n; i++) cum[t[off + i] + 1]++;
+  for (let k = 0; k < 256; k++) cum[k + 1] += cum[k];
+  const at = cum.slice(0, 256);
+  for (let i = 0; i < n; i++) idx[at[t[off + i]]++] = i;
+  tstat.sort += performance.now() - s;
+  return { idx: new THREE.BufferAttribute(idx, 1), cum };
+}
+function thinDraw(g) { // the app's class Points and the selection: g's draw range for thinMm (off: no index, every point as before)
+  const d = g?.userData.thin;
+  if (!d) return;
+  if (thinMm === Infinity) { if (g.index) g.setIndex(null); g.setDrawRange(0, Infinity); return; }
+  if (g.index !== d.idx) g.setIndex(d.idx);
+  g.setDrawRange(0, d.cum[cumK()]);
+}
+function band(f) { // a find's band for thinMm, coarse to fine
+  const s = performance.now(), d = f.tsort, { order, ends, s: cell } = c2f(f.xyz, d.idx.array.subarray(0, d.cum[cumK()]), f.c.voxel || 0.005, f.b);
+  f.band = { mm: thinMm, idx: new THREE.BufferAttribute(f.n < 65536 ? Uint16Array.from(order) : order, 1), lod: { ends, s: cell, band: true } };
+  tstat.band += performance.now() - s;
+}
+function findDraw(f) { // what a find draws: f.draw = {n points of its index, lv: the LOD steps lodUpdate takes a prefix of}
+  const g = f.pts?.geometry;
+  if (!g) return;
+  let idx = null, n = f.n, lv = f.lod ?? null; // not a crack, not thinned (yet), or "puna": its stored order
+  if (f.tsort && thinMm !== Infinity) {
+    if (f.band?.mm === thinMm) { idx = f.band.idx; n = idx.count; lv = f.band.lod; }
+    else { idx = f.tsort.idx; n = f.tsort.cum[cumK()]; lv = null; } // no band for this width (yet): all of it, in t order
+  }
+  if (g.index !== idx) g.setIndex(idx);
+  f.draw = { n, lv }; g.setDrawRange(0, n);
+}
+function rebands() { // the LOD's bands for thinMm
+  clearTimeout(bandT); bandT = 0;
+  if (LOD && thinMm !== Infinity) for (const f of finds) if (f.tsort && f.band?.mm !== thinMm) band(f);
+  for (const f of finds) findDraw(f);
+  dev('thin', thinLine());
+}
+function thinAll(now) { // thinMm changed
+  for (const f of finds) findDraw(f);
+  for (const c of C) thinDraw(c.appPts?.geometry);
+  thinDraw(selPts?.geometry);
+  clearTimeout(bandT); bandT = 0;
+  if (LOD) { if (now) rebands(); else bandT = setTimeout(rebands, 200); }
+}
+const thinLine = () => `${tstat.pts.toLocaleString()} pts in ${tstat.n} jobs: ${tstat.ms.toFixed(0)} ms ${thinWorker ? 'worker' : 'main thread'}, ` +
+  `${(tstat.t1 - tstat.t0).toFixed(0)} ms wall, sort ${tstat.sort.toFixed(1)} ms` + (LOD ? `, bands ${tstat.band.toFixed(0)} ms` : '');
+function thinLocal(id) { // no module Worker (or thin.js failed in one): the same job on this thread
+  (thinMod ??= import(thinURL.href)).then((m) => { const w = thinWait.get(id); thinWait.delete(id); w?.res(m.job(w.msg)); })
+    .catch((e) => { console.warn('[thin] unavailable:', e.message); thinWait.get(id)?.res(null); thinWait.delete(id); });
+}
+function thinJob(msg, done) { // {pos, runs, voxel, base?, scale?} -> done(t) (null: no thinning); lod.damageBusy until all are done
+  if (!tstat.n++) tstat.t0 = performance.now();
+  tstat.pts += msg.runs.reduce((a, v, i) => a + (i & 1 ? v : 0), 0);
+  lod.damageBusy = true;
+  new Promise((res) => {
+    const id = ++thinSeq;
+    thinWait.set(id, { res, msg });
+    if (thinWorker === null) {
+      try {
+        thinWorker = new Worker(thinURL, { type: 'module' });
+        thinWorker.onmessage = (e) => {
+          const w = thinWait.get(e.data.id);
+          thinWait.delete(e.data.id);
+          if (e.data.error) console.warn('[thin]', e.data.error); else tstat.ms += e.data.ms;
+          w?.res(e.data.t ?? null);
+        };
+        thinWorker.onerror = (e) => { e.preventDefault(); thinWorker = false; for (const k of [...thinWait.keys()]) thinLocal(k); };
+      } catch { thinWorker = false; }
+    }
+    if (thinWorker) thinWorker.postMessage({ id, ...msg }); else thinLocal(id);
+  }).then((t) => {
+    try { done(t); } catch (e) { console.warn('[thin]', e); }
+    tstat.t1 = performance.now();
+    if (!thinWait.size) { lod.damageBusy = false; dev('thin', thinLine()); }
+  });
+}
+const isCrack = (c) => c.measure === 'length';
+function thinFind(it) { // a find's floats (LOD: already coarse to fine), as one item
+  if (!isCrack(it.c)) return;
+  thinJob({ pos: it.xyz, runs: [0, it.n], voxel: it.c.voxel || 0.005 }, (t) => {
+    if (!t || !it.pts) return;
+    it.tsort = thinOrder(t, 0, it.n);
+    if (LOD && thinMm !== Infinity) band(it);
+    findDraw(it);
+    if (sel === it) thinSel();
+  });
+}
+function thinApp(c, jc) { // the app's class run: its items are runs in it (no LOD: one Points per class)
+  const runs = [];
+  for (const it of J.items) if (J.classes[it.c] === jc) runs.push(it.s - jc.start, it.n);
+  thinJob({ pos: Q.slice(jc.start * 3, (jc.start + jc.count) * 3), runs, voxel: c.voxel || 0.005, base: B, scale: K }, (t) => {
+    if (!t) return;
+    c.appThin = { t, start: jc.start }; c.appPts.geometry.userData.thin = thinOrder(t, 0, jc.count); thinDraw(c.appPts.geometry);
+    if (sel?.c === c && !sel.xyz) thinSel();
+  });
+}
+function thinSel() { // the selected item's white overlay: the points its class draws (all of the band: no LOD)
+  const g = selPts?.geometry, d = sel?.xyz ? sel.tsort : sel?.c.appThin;
+  if (!g || !d) return;
+  g.userData.thin = sel.xyz ? { idx: new THREE.BufferAttribute(d.idx.array, 1), cum: d.cum } // own attribute: disposed with g
+    : thinOrder(d.t, sel.s - d.start, sel.n);
+  thinDraw(g);
+}
+
 // ---------- "Slojevi": the layers popover above its dock tool ----------
 const pop = h('div', 'dm dm-pop'), ph = h('div', 'dm-ph1'), px = btn('dm-px', 'Zatvori slojeve', svg(XP));
 const msg = h('div', 'dm-msg', LOADING), rows = h('div', 'dm-rows'), ar = h('i', 'dm-ar');
@@ -374,7 +502,20 @@ sl.oninput = () => {
   if (post) post.U.opacity.value = opacity; else for (const c of C) c.mat.opacity = opacity;
 };
 sl.oninput(); lab.append('Neprozirnost oštećenja', val);
-ph.append(h('span', 'cap', 'Klase oštećenja'), px); pop.append(ph, msg, rows, lab, sl, ar); document.body.append(pop);
+// "Debljina pukotina": the drawn band's width on the bridge, ~ 2 x the half-width + a point's size; at the end every point
+const tlab = h('div', 'dm-ol'), tval = h('span', 'num'), tsl = h('input', 'dm-sl'), n1 = nf({ minimumFractionDigits: 1, maximumFractionDigits: 1 });
+Object.assign(tsl, { type: 'range', min: 0, max: THIN.length - 1, step: 1 });
+tsl.setAttribute('aria-label', 'Debljina pukotina');
+const tshow = () => {
+  tsl.value = THIN.reduce((b, v, i) => (Math.abs(v - thinMm) < Math.abs(THIN[b] - thinMm) || v === thinMm ? i : b), 0);
+  const crack = C.find(isCrack), size = 1.5 * (crack?.voxel || 0.005) * 1000; // mm, the class points' size
+  tval.textContent = thinMm === Infinity ? 'puna' : `${n1((2 * thinMm + size) / 10)} cm`; tsl.style.setProperty('--p', tsl.value / (THIN.length - 1));
+  tsl.setAttribute('aria-valuetext', tval.textContent);
+};
+tsl.oninput = () => { thinMm = THIN[tsl.value]; tshow(); thinAll(); };
+tshow(); tlab.append('Debljina pukotina', tval);
+lod.thin = { stats: tstat, set: (mm) => { thinMm = mm; tshow(); thinAll(true); } }; // for the bench (--eval): the bands at once
+ph.append(h('span', 'cap', 'Klase oštećenja'), px); pop.append(ph, msg, rows, lab, sl, tlab, tsl, ar); document.body.append(pop);
 pop.setAttribute('role', 'dialog'); pop.setAttribute('aria-label', 'Slojevi');
 const tool = ui.tool({ label: 'Slojevi', order: 10, onClick: () => layers(pop.style.display === 'none'),
   icon: '<path d="M10 3.5l7.5 4.2-7.5 4.2-7.5-4.2z"/><path d="M2.5 12l7.5 4.2 7.5-4.2"/>' }); // layers; lod.ui wraps the <svg>
@@ -440,7 +581,12 @@ async function loadBin() {
   if (buf.byteLength !== J.points * 6) throw new Error(`damage.bin: ${buf.byteLength} B, expected ${J.points * 6}`);
   Q = new Uint16Array(buf);
   B = J.box.slice(0, 3); S = B.map((v, i) => Math.max(J.box[i + 3] - v, 1e-6)); K = S.map((s) => s / 65535);
-  for (const jc of J.classes) if (jc.count) klass(jc.name).g.add(points(new Uint16Array(buf, jc.start * 6, jc.count * 3), klass(jc.name).mat, unitBox(J.box), true));
+  for (const jc of J.classes) {
+    if (!jc.count) continue;
+    const c = klass(jc.name);
+    c.g.add((c.appPts = points(new Uint16Array(buf, jc.start * 6, jc.count * 3), c.mat, unitBox(J.box), true)));
+    if (isCrack(c)) thinApp(c, jc);
+  }
   J.items.forEach((it, i) => app.push({ ...it, c: klass(J.classes[it.c].name), p: it.p.map(([k, ...r]) => [J.photos[k], ...r]),
     img: `${BASE}img/${i}_`, title: String(it.id), tid: `C-${it.id}` }));
   dev('damage', `${J.items.length.toLocaleString()} items · ${(J.points / 1e6).toFixed(2)} M points`);
@@ -457,6 +603,7 @@ async function loadFind(f) {
     img: `${FOUND}img/${f.id}_`, title: id, tid: id };
   if (LOD) progressive(it);
   it.pts = itemPts(it, it.c.mat);
+  thinFind(it);
   return it;
 }
 function drop(gone) { // finds no longer in the store
@@ -544,6 +691,7 @@ lod.el.addEventListener('pointerup', (e) => {
   if (!best) return missed();
   select(best);
 });
+lod.selectDamage = (tid) => select(app.concat(finds).find((x) => x.tid === tid) ?? null); // for the bench (--eval): 'P9', 'C-4'
 
 function select(it) {
   if (it === sel) return; // e.g. the double-click/tap that sets the pivot: keep the panel and its scroll
@@ -554,6 +702,7 @@ function select(it) {
   selMat.size = 2.5 * (it.c.voxel || 0.01);
   selPts = itemPts(it, selMat);
   selPts.renderOrder = 999;
+  thinSel();
   (post ? over : root).add(selPts);
   showPanel(it, it.c);
 }
