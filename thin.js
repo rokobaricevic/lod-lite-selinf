@@ -132,6 +132,31 @@ export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
   for (let y = 1; y < H - 1; y++) for (let x = 1, p = y * W + 1; x < W - 1; x++, p++) tmp[p] = occ[p - 1] & occ[p] & occ[p + 1];
   const fg = [];
   for (let y = 1; y < H - 1; y++) for (let x = 1, p = y * W + 1; x < W - 1; x++, p++) { occ[p] = tmp[p - W] & tmp[p] & tmp[p + W]; if (occ[p]) fg.push(p); }
+  // holes: background the border cannot reach (4-connected); the small ones (up to ~5 x 5 cm) are gaps in the mask,
+  // not cells enclosed by cracks: filled, so the centreline makes no loop around them
+  const holeMax = o.holeMax ?? Math.round((0.05 / c) ** 2);
+  if (holeMax > 0) {
+    tmp.fill(0); // 1: outside, 2: a hole's
+    const st = [];
+    for (let x = 0; x < W; x++) st.push(x, (H - 1) * W + x);
+    for (let y = 0; y < H; y++) st.push(y * W, y * W + W - 1);
+    while (st.length) {
+      const p = st.pop();
+      if (p < 0 || p >= N || tmp[p] || occ[p]) continue;
+      tmp[p] = 1;
+      const x = p % W;
+      if (x > 0) st.push(p - 1);
+      if (x < W - 1) st.push(p + 1);
+      st.push(p - W, p + W);
+    }
+    for (let p = 0; p < N; p++) {
+      if (occ[p] || tmp[p]) continue;
+      const hole = [], q = [p];
+      tmp[p] = 2;
+      while (q.length) { const a = q.pop(); hole.push(a); for (const b of [a - 1, a + 1, a - W, a + W]) if (!occ[b] && !tmp[b]) { tmp[b] = 2; q.push(b); } }
+      if (hole.length <= holeMax) for (const a of hole) { occ[a] = 1; fg.push(a); }
+    }
+  }
   const mask = occ.slice(), layer = new Uint16Array(N), img = occ; // img: thinned in place; mask: the closed mask
   let sk = skeleton(img, W, fg, layer);
   const half = (p) => { // a skeleton pixel's half-width (metres): the deepest layer around it

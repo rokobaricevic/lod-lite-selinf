@@ -76,6 +76,13 @@ test('a Y: every branch keeps its centreline, a bump makes no spur', () => {
   assert.equal(spur, 0, `${spur} lump points within 1 cm of a centreline`);
 });
 
+test('a small hole in the mask makes no loop', () => {
+  const m = mask((x, y) => Math.abs(y) < 0.03 && Math.hypot(x - 0.25, y) > 0.012, [0, -0.04, 0.5, 0.04]), t = centreDist(m.P, m.n, VOX);
+  let loop = 0; // points beside the hole, ~2 cm off the axis, near a centreline
+  for (let i = 0; i < m.n; i++) if (Math.abs(m.uv[2 * i] - 0.25) < 0.005 && Math.abs(m.uv[2 * i + 1]) > 0.016 && t[i] * UNIT < 0.008) loop++;
+  assert.equal(loop, 0, `${loop} points beside the hole within 8 mm of a centreline`);
+});
+
 test('the tips reach the mask end (dead ends extended)', () => {
   const m = mask((x, y) => Math.abs(y) < 0.03 && x > 0 && x < 0.5, [-0.01, -0.04, 0.51, 0.04]), t = centreDist(m.P, m.n, VOX);
   let xmin = 1, xmax = -1;
