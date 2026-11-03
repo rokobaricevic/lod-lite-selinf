@@ -499,7 +499,7 @@ def test_the_server_wants_the_login_and_serves_only_the_viewer(tmp_path):
     s = make_survey(tmp_path)
     site = tmp_path / "site"
     (site / "out" / "tiles").mkdir(parents=True)
-    for f in ("viewer.html", "selinf.js", "out/tileset.json", "out/tiles/0.glb", "selinf.py", "job_params.json"):
+    for f in ("viewer.html", "selinf.js", "thin.js", "out/tileset.json", "out/tiles/0.glb", "selinf.py", "job_params.json"):
         (site / f).write_text(f)
     srv = selinf.server(s.core, strip_infer(s, []), ["Crack"], site, port=0, auth="test:test")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -519,7 +519,8 @@ def test_the_server_wants_the_login_and_serves_only_the_viewer(tmp_path):
             assert get(path, "test:wrong", body)[0] == 401
         assert get("/") == get("/viewer.html") == (200, b"viewer.html")
         assert get("/selinf.js") == (200, b"selinf.js") and get("/out/tiles/0.glb?x=1") == (200, b"out/tiles/0.glb")
-        for path, kind in (("/", "text/html"), ("/selinf.js", "text/javascript"), ("/out/tileset.json", "application/json"),
+        for path, kind in (("/", "text/html"), ("/selinf.js", "text/javascript"), ("/thin.js", "text/javascript"),
+                           ("/out/tileset.json", "application/json"),
                            ("/out/tiles/0.glb", "model/gltf-binary")):   # not the Windows registry's (a module needs JS)
             req = Request(f"http://127.0.0.1:{srv.server_address[1]}{path}",
                           headers={"Authorization": "Basic " + base64.b64encode(b"test:test").decode()})
