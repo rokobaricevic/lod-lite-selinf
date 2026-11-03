@@ -21,7 +21,7 @@ from scipy.spatial import cKDTree
 ROOT = Path(__file__).resolve().parent
 SOURCE, WORK, OUT = ROOT / "source", ROOT / "work", ROOT / "out"
 NODES, META = WORK / "nodes", WORK / "meta"
-TRIS = 200_000          # leaf size and simplify target
+TRIS = 50_000           # leaf size and simplify target: small tiles stream in small steps over a slow link
 MIN_TEXEL = 0.0054      # m, native atlas resolution
 Image.MAX_IMAGE_PIXELS = None
 
@@ -74,6 +74,28 @@ def centroids(pos, fp, chunk=4_000_000):
         f = np.asarray(fp[s:s + chunk])
         out[s:s + chunk] = (pos[f[:, 0]] + pos[f[:, 1]] + pos[f[:, 2]]) / 3
     return out
+
+
+def face_points(pos, fp, step=0.05, chunk=4_000_000):
+    """Points on the faces at most ~step apart, and the face each lies on: every centroid, plus a barycentric grid on
+    the faces with an edge longer than step. The survey has a few thousand triangles of up to 17 m (~45 % of its
+    area); a texel on one is metres from its centroid, so the nearest centroids alone miss the face it lies on."""
+    long = []
+    for s in range(0, len(fp), chunk):
+        p = pos[np.asarray(fp[s:s + chunk])]
+        long.append(s + np.flatnonzero((np.linalg.norm(p - p[:, [1, 2, 0]], axis=2) > step).any(1)))
+    f = np.concatenate(long)
+    p = pos[np.asarray(fp[f])].astype(np.float64)
+    n = np.ceil(np.linalg.norm(p - p[:, [1, 2, 0]], axis=2).max(1) / step).astype(int)
+    pts, own = [centroids(pos, fp)], [np.arange(len(fp), dtype=np.int32)]
+    for m in np.unique(n):  # the faces cut m times along each edge, together
+        i, j = np.divmod(np.arange((m + 1) ** 2), m + 1)
+        a, b = (i[i + j <= m] / m)[:, None], (j[i + j <= m] / m)[:, None]
+        q = p[n == m][:, None]
+        pts.append((q[..., 0, :] + a * (q[..., 1, :] - q[..., 0, :]) + b * (q[..., 2, :] - q[..., 0, :])).reshape(-1, 3)
+                   .astype(np.float32))
+        own.append(np.repeat(f[n == m], len(a)).astype(np.int32))
+    return np.concatenate(pts), np.concatenate(own)
 
 
 def make_tree():
@@ -314,7 +336,7 @@ def parametrize(pos, faces, texel, max_px, sub_tris=10_000):
     import xatlas
     p = pos.astype(np.float64)
     area = 0.5 * np.linalg.norm(np.cross(p[faces[:, 1]] - p[faces[:, 0]], p[faces[:, 2]] - p[faces[:, 0]]), axis=1).sum()
-    texel = max(texel, float(np.sqrt(area / (0.7 * max_px ** 2))))  # ~70 % fill must fit
+    texel = max(texel, float(np.sqrt(area / (0.5 * max_px ** 2))))  # 50 % fill: xatlas's padding overshoots 70 %
     subs = []
     for g in kd_split(p[faces].mean(1), np.arange(len(faces)), sub_tris):
         used, inv = np.unique(faces[g], return_inverse=True)
@@ -329,7 +351,7 @@ def parametrize(pos, faces, texel, max_px, sub_tris=10_000):
         w, h = int(atlas.width), int(atlas.height)
         if atlas.atlas_count == 1 and w <= max_px and h <= max_px:
             break
-        texel *= max(max(w, h) / max_px if atlas.atlas_count == 1 else 1.3, 1.05) * 1.03
+        texel *= max(max(w, h) / max_px if atlas.atlas_count == 1 else 1.3, 1.05) * 1.08
     else:
         raise RuntimeError("xatlas could not fit the mesh into max_px")
     vmaps, uvs, out = [], [], np.empty_like(faces)
@@ -395,11 +417,12 @@ def bake(pos, faces, ids, texel, max_px, G):
     valid = covered.reshape(-1)
     P, N = texel_attrs(tri, bary, res_pos.astype(np.float64), idx.astype(np.int64), face_normals(res_pos, idx))
     fp, ft = np.asarray(G["fp"][ids]), np.asarray(G["ft"][ids])
-    tree = cKDTree(centroids(G["pos"], fp))
+    pts, own = face_points(G["pos"], fp)
+    tree = cKDTree(pts)
     cand = np.full((len(P), 8), -1, np.int64)
     vi = np.flatnonzero(valid)
-    cand[vi] = tree.query(P[vi], k=8, workers=-1)[1]
-    del tree
+    cand[vi] = own[tree.query(P[vi], k=8, workers=-1)[1]]
+    del tree, pts, own
     sf, sb = select_closest(P, N, cand, G["pos"], fp, valid, 0.2)
     suv = interp_uv(sf, sb, G["uv"], ft)
     img = sample_bilinear(G["atlas"], suv, valid).reshape(h, w, 3)
@@ -414,7 +437,8 @@ def bake(pos, faces, ids, texel, max_px, G):
 # ------------------------------------------------------------------ glb
 
 def ktx2_encode(img):
-    """Edge-pad to multiples of 4, encode UASTC KTX2. Returns (ktx2 bytes, uv scale [w/W, h/H])."""
+    """Edge-pad to multiples of 4, encode UASTC KTX2 (ETC1S is ~7x smaller but shows pink-green block artifacts).
+    Returns (ktx2 bytes, uv scale [w/W, h/H])."""
     ktx = os.environ.get("KTX_BIN") or shutil.which("ktx")
     if not ktx:
         sys.exit("ktx not found: install KTX-Software (brew install ktx-software) or set KTX_BIN")
@@ -429,8 +453,17 @@ def ktx2_encode(img):
         return Path(f"{td}/t.ktx2").read_bytes(), np.float32([w / W, h / H])
 
 
+def grid(a, e):
+    """meshopt's EXPONENTIAL filter with one exponent for every value: a uniform grid of 2**e, the same in every tile,
+    so a border vertex lands on the same point in all of them. Returns (filtered uint32, the float32 it decodes to)."""
+    q = np.round(np.asarray(a, np.float64) * 2.0 ** -e).astype(np.int64)
+    assert np.abs(q).max() < 1 << 23, "a value is outside the filter's 24-bit mantissa"
+    return ((q & 0xFFFFFF) | ((e & 0xFF) << 24)).astype(np.uint32), (q * 2.0 ** e).astype(np.float32)
+
+
 def write_glb(path, pos, uv, faces, ktx2):
-    """One mesh, unlit material, KTX2 texture, EXT_meshopt_compression (lossless float32 positions/uvs).
+    """One mesh, unlit material, KTX2 texture, EXT_meshopt_compression (v1 codec; positions on a 2^-12 m = 0.24 mm grid,
+    uvs on a 2^-16 grid; 16-bit indices below 65536 vertices).
     Buffer 0 = GLB BIN chunk (compressed data + image); buffer 1 = uri-less fallback describing the raw layout."""
     import meshoptimizer as mo
     pos = np.ascontiguousarray(np.stack([pos[:, 0], pos[:, 2], -pos[:, 1]], 1), np.float32)  # Z-up -> Y-up
@@ -440,15 +473,17 @@ def write_glb(path, pos, uv, faces, ktx2):
     vtx = np.ascontiguousarray(np.hstack([pos, uv]), np.float32)
     out = np.empty_like(vtx)
     n = mo.optimize_vertex_fetch(out, opt, vtx)  # also renumbers `opt` in place
-    pos, uv, idx = np.ascontiguousarray(out[:n, :3]), np.ascontiguousarray(out[:n, 3:]), opt
+    (pos_f, pos), (uv_f, uv), idx = grid(out[:n, :3], -12), grid(out[:n, 3:], -16), opt
+    isz = 2 if n < 65536 else 4
+    mo.encode_vertex_version(1)
     binary, views, fb = bytearray(), [], 0
     for data, raw, mode, stride, target, count in (
-            (mo.encode_vertex_buffer(pos), pos.nbytes, "ATTRIBUTES", 12, 34962, n),
-            (mo.encode_vertex_buffer(uv), uv.nbytes, "ATTRIBUTES", 8, 34962, n),
-            (mo.encode_index_buffer(idx), idx.nbytes, "TRIANGLES", 4, 34963, len(idx))):
+            (mo.encode_vertex_buffer(pos_f), pos.nbytes, "ATTRIBUTES", 12, 34962, n),
+            (mo.encode_vertex_buffer(uv_f), uv.nbytes, "ATTRIBUTES", 8, 34962, n),
+            (mo.encode_index_buffer(idx), len(idx) * isz, "TRIANGLES", isz, 34963, len(idx))):
         binary += b"\0" * (-len(binary) % 4)
         ext = {"buffer": 0, "byteOffset": len(binary), "byteLength": len(data), "byteStride": stride,
-               "mode": mode, "count": count}
+               "mode": mode, "count": count, **({"filter": "EXPONENTIAL"} if mode == "ATTRIBUTES" else {})}
         view = {"buffer": 1, "byteOffset": fb, "byteLength": raw, "target": target,
                 "extensions": {"EXT_meshopt_compression": ext}}
         if target == 34962:
@@ -476,7 +511,7 @@ def write_glb(path, pos, uv, faces, ktx2):
             {"bufferView": 0, "componentType": 5126, "count": n, "type": "VEC3",
              "min": pos.min(0).tolist(), "max": pos.max(0).tolist()},
             {"bufferView": 1, "componentType": 5126, "count": n, "type": "VEC2"},
-            {"bufferView": 2, "componentType": 5125, "count": len(idx), "type": "SCALAR"}],
+            {"bufferView": 2, "componentType": 5123 if isz == 2 else 5125, "count": len(idx), "type": "SCALAR"}],
         "bufferViews": views,
         "buffers": [{"byteLength": len(binary)},
                     {"byteLength": fb, "extensions": {"EXT_meshopt_compression": {"fallback": True}}}],
@@ -541,7 +576,7 @@ def do_tile(tid):
     if t["leaf"]:
         res_pos, uv, idx, img = repack(ids, G)
     else:
-        res_pos, uv, idx, img, texel = bake(pos, faces, ids, texel, 4096 if t["height"] >= 3 else 2048, G)
+        res_pos, uv, idx, img, texel = bake(pos, faces, ids, texel, 2048 if t["height"] >= 3 else 1024, G)
     ktx2, scale = ktx2_encode(img)
     write_glb(OUT / "tiles" / f"{tid}.tmp", res_pos, uv * scale, idx, ktx2)
     (OUT / "tiles" / f"{tid}.tmp").replace(OUT / "tiles" / f"{tid}.glb")
@@ -588,12 +623,13 @@ def build(workers):
     if not (WORK / "tree.json").exists():
         make_tree()
     tiles = json.load(open(WORK / "tree.json"))
-    sizes = {0: workers, 1: workers, 2: max(2, workers * 2 // 3), 3: 2, 4: 1}  # the root's 50M-centroid KD tree runs alone
-    for h in range(max(t["height"] for t in tiles) + 1):
+    top = max(t["height"] for t in tiles)   # the root's 50M-centroid KD tree runs alone, its children's two at a time
+    sizes = {top: 1, top - 1: 2, top - 2: max(2, workers * 2 // 3)}
+    for h in range(top + 1):
         todo = [t["id"] for t in tiles if t["height"] == h
                 and not ((OUT / "tiles" / f"{t['id']}.glb").exists() and (META / f"{t['id']}.json").exists())]
         t1 = time.time()
-        with ProcessPoolExecutor(sizes.get(h, 1)) as ex:
+        with ProcessPoolExecutor(sizes.get(h, workers)) as ex:
             for n, _ in enumerate(ex.map(do_tile, todo), 1):
                 if n % 20 == 0:
                     print(f"  height {h}: {n}/{len(todo)} {time.time() - t1:.0f}s", flush=True)

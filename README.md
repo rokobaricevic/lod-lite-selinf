@@ -20,7 +20,7 @@ uv run lod.py serve     # http://127.0.0.1:8000/viewer.html, the tiles only (no 
    at different levels never crack.
 4. Textures: leaves reuse the atlas's own texels. Each UV island's pixel rect is copied at an integer offset,
    so nothing is resampled. Parents are re-baked (xatlas + numba) from the closest point on the original mesh.
-5. Write 3D Tiles 1.1: KTX2 ETC1S textures, lossless meshopt geometry,
+5. Write 3D Tiles 1.1: KTX2 UASTC textures, meshopt geometry (positions on a 0.24 mm grid, the same in every tile),
    geometricError = max(simplify error, 16 × texel).
 
 The build is resumable, and takes about 30 min and up to ~12 GB RAM for the 50 M-triangle Petrinja survey.
