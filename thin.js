@@ -164,21 +164,19 @@ export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
     for (const d of D8) m = Math.max(m, layer[p + d]);
     return (m + 0.5) * c;
   };
-  // spurs: a dead end to a junction, shorter than 2 half-widths at the junction (+1 cell): all at once, then again
-  const spurK = o.spurK ?? 2;
-  for (let round = 0; round < 4; round++) {
-    const cut = [];
-    for (const e of sk) {
-      if (!img[e] || deg(img, e, W) !== 1) continue;
-      let b = -1;
-      for (const d of D8) if (img[e + d]) b = e + d;
-      const path = walk(img, W, e, b, D8), j = path[path.length - 1];
-      if (deg(img, j, W) >= 3 && steps(path, W) * c < spurK * half(j) + c) cut.push(path.slice(0, -1));
-    }
-    if (!cut.length) break;
-    for (const path of cut) for (const p of path) img[p] = 0;
-    sk = sk.filter((p) => img[p]);
+  // spurs: a dead end to a junction, shorter than 2 half-widths at the junction (+1 cell), all cut at once. Once only:
+  // a forked tip loses both prongs and its junction becomes the dead end, which must not be cut in turn (it would eat
+  // the crack back to the next junction); the extension below takes the new end to the mask's edge
+  const spurK = o.spurK ?? 2, cut = [];
+  for (const e of sk) {
+    if (deg(img, e, W) !== 1) continue;
+    let b = -1;
+    for (const d of D8) if (img[e + d]) b = e + d;
+    const path = walk(img, W, e, b, D8), j = path[path.length - 1];
+    if (deg(img, j, W) >= 3 && steps(path, W) * c < spurK * half(j) + c) cut.push(path.slice(0, -1));
   }
+  for (const path of cut) for (const p of path) img[p] = 0;
+  sk = sk.filter((p) => img[p]);
   // branches: node to node (nodes: degree != 2), then the loops left over
   const xy = (p) => [ox + ((p % W) + 0.5) * c, oy + (Math.floor(p / W) + 0.5) * c];
   const seen = new Uint8Array(N), paths = [];
