@@ -303,8 +303,8 @@ if (post) lod.renderFrame = () => {
   R.getDrawingBufferSize(dbs);
   if (dbs.x !== scene.width || dbs.y !== scene.height) { scene.setSize(dbs.x, dbs.y); mask?.setSize(HALF ? Math.ceil(dbs.x / 2) : dbs.x, HALF ? Math.ceil(dbs.y / 2) : dbs.y); }
   R.info.autoReset = false; R.info.reset(); // the HUD's calls / points: all passes
+  root.updateMatrixWorld(); // for inView (the scene's render would do it, after the test)
   if (INLINE) return inlineFrame(cam, ca);
-  root.updateMatrixWorld(); // (the scene's render would do it, after the test)
   const any = inView(cam);
   scene.resolveDepthBuffer = any; // no damage in view: the mask pass, the depth resolve and the composite's work are skipped
   root.visible = false;
