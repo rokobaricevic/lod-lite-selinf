@@ -137,24 +137,25 @@ export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
   const holeMax = o.holeMax ?? Math.round((0.05 / c) ** 2);
   if (holeMax > 0) {
     tmp.fill(0); // 1: outside, 2: a hole's
-    const st = [];
-    for (let x = 0; x < W; x++) st.push(x, (H - 1) * W + x);
-    for (let y = 0; y < H; y++) st.push(y * W, y * W + W - 1);
-    while (st.length) {
-      const p = st.pop();
-      if (p < 0 || p >= N || tmp[p] || occ[p]) continue;
-      tmp[p] = 1;
-      const x = p % W;
-      if (x > 0) st.push(p - 1);
-      if (x < W - 1) st.push(p + 1);
-      st.push(p - W, p + W);
+    const st = new Int32Array(N); // marked when pushed: each pixel once
+    let sp = 0;
+    const push = (p, k) => { if (!tmp[p] && !occ[p]) { tmp[p] = k; st[sp++] = p; } };
+    for (let x = 0; x < W; x++) { push(x, 1); push((H - 1) * W + x, 1); }
+    for (let y = 1; y < H - 1; y++) { push(y * W, 1); push(y * W + W - 1, 1); }
+    while (sp) {
+      const p = st[--sp], x = p % W;
+      if (x > 0) push(p - 1, 1);
+      if (x < W - 1) push(p + 1, 1);
+      if (p >= W) push(p - W, 1);
+      if (p < N - W) push(p + W, 1);
     }
-    for (let p = 0; p < N; p++) {
+    for (let p = W; p < N - W; p++) { // a hole is inside the closed mask, so its neighbours are in the raster
       if (occ[p] || tmp[p]) continue;
-      const hole = [], q = [p];
-      tmp[p] = 2;
-      while (q.length) { const a = q.pop(); hole.push(a); for (const b of [a - 1, a + 1, a - W, a + W]) if (!occ[b] && !tmp[b]) { tmp[b] = 2; q.push(b); } }
-      if (hole.length <= holeMax) for (const a of hole) { occ[a] = 1; fg.push(a); }
+      const h0 = sp;
+      push(p, 2);
+      for (let q = h0; q < sp; q++) { const a = st[q]; push(a - 1, 2); push(a + 1, 2); push(a - W, 2); push(a + W, 2); }
+      if (sp - h0 <= holeMax) for (let q = h0; q < sp; q++) { occ[st[q]] = 1; fg.push(st[q]); }
+      sp = h0;
     }
   }
   const mask = occ.slice(), layer = new Uint16Array(N), img = occ; // img: thinned in place; mask: the closed mask
