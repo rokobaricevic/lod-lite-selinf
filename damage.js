@@ -135,7 +135,6 @@ function mat(color, size, minPx, opts, defs = {}) {
   m.onBeforeCompile = patch;
   return m;
 }
-const selMat = mat(0xffffff, 0.02, 4, { depthTest: false, transparent: true }); // transparent: drawn after (over) the class points
 
 // ---------- the look: an opaque screen-space mask, laid over the scene once (?dmpost=0: the old blended sprites) ----------
 // The scene renders into an MSAA target. The class points draw OPAQUE (one write per sample) into a mask, depth-tested
@@ -160,8 +159,18 @@ const MODE = knob('dmmode', look[0]), INLINE = POST && !!knob('dminline', 1) && 
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1), HALF = POST && !INLINE && knob('dmhalf', 0);
 const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
-const over = new THREE.Group(); // POST: the selected damage, drawn over the composite
-over.rotation.x = -Math.PI / 2; over.visible = false; lod.scene.add(over);
+// a class's points (POST: opaque, into the mask; INLINE: after the bridge), and the selected damage's: the same points with
+// the same material, in a lighter colour, drawn just after its class's (the last write wins), so it is smoothed, outlined
+// and hidden behind the bridge like the rest
+const classMat = (color, voxel, opacity) => (POST ? mat(color, 1.5 * voxel, 2.5, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ)
+  : mat(color, 1.5 * voxel, 2.5, { transparent: true, opacity, depthWrite: false }));
+const selMat = classMat(0xffffff, 0.01, 0.8), SEL_LIGHT = Math.min(1, Math.max(0, knob('dmsel', 0.45))); // ?dmsel=: how far toward white
+function selColor(c) { // c's colour as drawn (POST: the mask keeps a colour at a max channel of 1), SEL_LIGHT of the way to white
+  const col = new THREE.Color(c.color), s = {};
+  if (POST) col.multiplyScalar(1 / Math.max(col.r, col.g, col.b, 1e-3));
+  col.getRGB(s, THREE.SRGBColorSpace);
+  return col.setRGB(...[s.r, s.g, s.b].map((v) => v + (1 - v) * SEL_LIGHT), THREE.SRGBColorSpace);
+}
 const post = POST && (() => {
   const depth = new THREE.DepthTexture(1, 1); depth.type = THREE.UnsignedIntType; // DEPTH_COMPONENT24, shared by both
   const scene = new THREE.WebGLRenderTarget(1, 1, { samples: knob('dmsamples', 4), depthTexture: INLINE ? null : depth, resolveDepthBuffer: !INLINE,
@@ -260,7 +269,7 @@ void main() {
   return { scene, mask, U, shade, copy, quad, cam };
 })();
 // the frame (viewer.html's loop and bench.py both call lod.renderFrame): the scene without the damage into post.scene, the
-// damage into the mask (only when some is in view), the composite onto the canvas, the selected damage over it
+// damage (the selected one in it, lighter) into the mask (only when some is in view), the composite onto the canvas
 // LOD (POST; ?dmlod=0: off): a find's points are reordered coarse to fine (one per cell of 64, 32, ... 2 voxels, then the
 // rest), so any prefix is an even subsample; each frame a find draws only the prefix whose spacing stays under LOD_PX px
 // at its nearest depth. Far away its sprites overlap many times anyway, and the mask shows coverage, not count.
@@ -347,7 +356,6 @@ if (post) lod.renderFrame = () => {
   }
   quad.material = any ? post.shade : post.copy;
   R.setRenderTarget(null); R.render(quad, post.cam);
-  if (selPts) { over.visible = true; R.render(over, cam); over.visible = false; }
   drawTops(cam);
   R.autoClear = true;
 };
@@ -371,7 +379,6 @@ function inlineFrame(cam, ca) {
   U.logFar.value = Math.log2(cam.far + 1); U.pxPerM.value = (cam.projectionMatrix.elements[5] * dbs.y) / 2;
   quad.material = any ? post.shade : post.copy;
   R.setRenderTarget(null); R.render(quad, post.cam);
-  if (selPts) { over.visible = true; R.render(over, cam); over.visible = false; }
   drawTops(cam);
   R.autoClear = true;
 }
@@ -386,7 +393,7 @@ function points(arr, m, box, quant) { // quant: the app's normalized uint16 in t
   g.boundingSphere = box.getBoundingSphere(new THREE.Sphere()); // no scan of 1.7 M points
   const p = new THREE.Points(g, m);
   if (quant) { p.position.fromArray(B); p.scale.fromArray(S); }
-  if (INLINE && m !== selMat) { p.onBeforeRender = dbMask; p.onAfterRender = dbScene; } // in the scene pass: into the mask only
+  if (INLINE) { p.onBeforeRender = dbMask; p.onAfterRender = dbScene; } // in the scene pass: into the mask only
   return p;
 }
 const itemPts = (it, m) => (it.xyz ? points(it.xyz, m, new THREE.Box3().setFromArray(it.b).expandByScalar(0.001), false) // b: to 1 mm
@@ -490,7 +497,6 @@ function thinFind(it) { // a find's floats (LOD: already coarse to fine), as one
     it.tsort = thinOrder(t, 0, it.n);
     if (LOD && thinMm !== Infinity) band(it);
     findDraw(it);
-    if (sel === it) thinSel();
   });
 }
 function thinApp(c, jc) { // the app's class run: its items are runs in it (no LOD: one Points per class)
@@ -502,11 +508,10 @@ function thinApp(c, jc) { // the app's class run: its items are runs in it (no L
     if (sel?.c === c && !sel.xyz) thinSel();
   });
 }
-function thinSel() { // the selected item's white overlay: the points its class draws (all of the band: no LOD)
-  const g = selPts?.geometry, d = sel?.xyz ? sel.tsort : sel?.c.appThin;
-  if (!g || !d) return;
-  g.userData.thin = sel.xyz ? { idx: new THREE.BufferAttribute(d.idx.array, 1), cum: d.cum } // own attribute: disposed with g
-    : thinOrder(d.t, sel.s - d.start, sel.n);
+function thinSel() { // an app item's selection: the points of its run that its class draws (a find's shares the find's geometry)
+  const g = selPts?.geometry, d = sel?.c.appThin;
+  if (!g || !d || sel.pts) return;
+  g.userData.thin = thinOrder(d.t, sel.s - d.start, sel.n);
   thinDraw(g);
 }
 
@@ -518,7 +523,7 @@ Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
 sl.setAttribute('aria-label', 'Neprozirnost oštećenja');
 sl.oninput = () => {
   opacity = sl.value / 100; val.textContent = pct(opacity); sl.style.setProperty('--p', opacity); // --p: the blue fill
-  if (post) post.U.opacity.value = opacity; else for (const c of C) c.mat.opacity = opacity;
+  if (post) post.U.opacity.value = opacity; else for (const m of [selMat, ...C.map((c) => c.mat)]) m.opacity = opacity;
 };
 sl.oninput(); lab.append('Neprozirnost oštećenja', val);
 // "Debljina pukotina": the drawn band's width on the bridge, ~ 2 x the half-width + a point's size; at the end every point
@@ -557,8 +562,7 @@ function klass(name, o) { // the class called name, made on first use: the palet
   if (c) return c;
   const crack = name === 'Crack', r = h('div', 'dm-row'), eye = btn('dm-eye', ''); // the whole row toggles; the eye is its button
   c = { name, color: CL[name]?.[1] ?? '#828A92', voxel: crack ? 0.005 : 0.01, measure: crack ? 'length' : 'area', items: 0, total: 0, ...o, g: new THREE.Group(), row: r };
-  c.mat = POST ? mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ) // opaque, into the mask; both kinds share it; INLINE: after the bridge
-    : mat(c.color, 1.5 * (c.voxel || 0.01), 2.5, { transparent: true, opacity, depthWrite: false });
+  c.mat = classMat(c.color, c.voxel || 0.01, opacity); // both kinds share it
   c.g.renderOrder = crack ? 1 : 0; // POST: the last write wins, cracks over the areas they cross
   r.append(swatch(c.color), h('span', 'dm-nm', hr(c)), (c.ct = h('span', 'num dm-ct')), (c.tot = h('span', 'num dm-tot')), eye);
   c.show = (v) => { // hidden: both kinds, hollow swatch, --t-off text, eye-off
@@ -626,7 +630,7 @@ async function loadFind(f) {
   return it;
 }
 function drop(gone) { // finds no longer in the store
-  for (const f of gone) { f.c.g.remove(f.pts); f.pts.geometry.dispose(); if (sel === f) select(null); }
+  for (const f of gone) { if (sel === f) select(null); f.c.g.remove(f.pts); f.pts.geometry.dispose(); }
   finds = finds.filter((f) => !gone.includes(f)); tally();
 }
 const key = (f) => `${f.id} ${f.time}`; // ids are not reused; a wiped store could
@@ -714,15 +718,17 @@ lod.selectDamage = (tid) => select(app.concat(finds).find((x) => x.tid === tid) 
 
 function select(it) {
   if (it === sel) return; // e.g. the double-click/tap that sets the pivot: keep the panel and its scroll
-  if (selPts) { selPts.parent.remove(selPts); selPts.geometry.dispose(); selPts = null; }
+  if (selPts) { selPts.parent?.remove(selPts); if (!sel?.pts) selPts.geometry.dispose(); selPts = null; }
   sel = it;
   closeView();
   if (!it) return void (panel.style.display = 'none');
-  selMat.size = 2.5 * (it.c.voxel || 0.01);
-  selPts = itemPts(it, selMat);
-  selPts.renderOrder = 999;
-  thinSel();
-  (post ? over : root).add(selPts);
+  selMat.color.copy(selColor(it.c)); selMat.size = it.c.mat.size; selMat.opacity = opacity;
+  if (it.pts) { // a find: its own Points' geometry (its index, thinned band and LOD draw range), so exactly its points
+    selPts = new THREE.Points(it.pts.geometry, selMat);
+    selPts.onBeforeRender = it.pts.onBeforeRender; selPts.onAfterRender = it.pts.onAfterRender;
+  } else { selPts = itemPts(it, selMat); thinSel(); } // the app's: a view of its run in the class's points
+  selPts.renderOrder = 1; // in its class's group, just after the class's points
+  it.c.g.add(selPts);
   showPanel(it, it.c);
 }
 
