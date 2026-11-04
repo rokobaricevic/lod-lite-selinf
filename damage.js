@@ -159,12 +159,13 @@ const MODE = knob('dmmode', look[0]), INLINE = POST && !!knob('dminline', 1) && 
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1), HALF = POST && !INLINE && knob('dmhalf', 0);
 const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
+const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost oštećenja) moves
 // a class's points (POST: opaque, into the mask; INLINE: after the bridge), and the selected damage's: the same points with
 // the same material, in a lighter colour, drawn just after its class's (the last write wins), so it is smoothed, outlined
 // and hidden behind the bridge like the rest
 const classMat = (color, voxel, opacity) => (POST ? mat(color, 1.5 * voxel, 2.5, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ)
   : mat(color, 1.5 * voxel, 2.5, { transparent: true, opacity, depthWrite: false }));
-const selMat = classMat(0xffffff, 0.01, 0.8), SEL_LIGHT = Math.min(1, Math.max(0, knob('dmsel', 0.45))); // ?dmsel=: how far toward white
+const selMat = classMat(0xffffff, 0.01, OPACITY), SEL_LIGHT = Math.min(1, Math.max(0, knob('dmsel', 0.45))); // ?dmsel=: how far toward white
 function selColor(c) { // c's colour as drawn (POST: the mask keeps a colour at a max channel of 1), SEL_LIGHT of the way to white
   const col = new THREE.Color(c.color), s = {};
   if (POST) col.multiplyScalar(1 / Math.max(col.r, col.g, col.b, 1e-3));
@@ -183,7 +184,7 @@ const post = POST && (() => {
     minFilter: THREE.LinearMipmapLinearFilter, count: SIZE ? 2 : 1 });
   if (SIZE) mask.textures[1].format = THREE.RedFormat;
   const mt = INLINE ? scene.textures[1] : mask.texture;
-  const U = { tScene: { value: scene.texture }, tMask: { value: mt }, tDepth: { value: depth }, opacity: { value: 0.8 },
+  const U = { tScene: { value: scene.texture }, tMask: { value: mt }, tDepth: { value: depth }, opacity: { value: OPACITY },
     tSize: { value: SIZE ? mask.textures[1] : mt },
     logFar: { value: 1 }, pxPerM: { value: 1 }, sprite: { value: 1.5 * knob('dmvox', 0.005) }, minPx: { value: 2.5 },
     kSig: { value: knob('dmk', look[1]) }, thr: { value: knob('dmt', look[2]) }, thrS: { value: knob('dmts', knob('dmt', look[2]) + 0.05) }, outPx: { value: knob('dmo', look[3]) },
@@ -385,7 +386,7 @@ function inlineFrame(cam, ca) {
 
 // C: the classes ({name, color, voxel, measure, items + total: the app's, g: its group, mat}); app, finds: the two kinds of
 // damage ({c, n, m, b, p: [[photo name, box]], img, title, tid}; the app's: s = its run in Q, a find's: xyz = its floats)
-let J = null, Q = null, B, S, K, finds = [], opacity = 0.8, sel = null, selPts = null;
+let J = null, Q = null, B, S, K, finds = [], opacity = OPACITY, sel = null, selPts = null;
 const C = [], app = [], Z = [0, 0, 0], U = [1, 1, 1];
 const unitBox = (b) => new THREE.Box3().setFromArray(b.map((v, i) => (v - B[i % 3]) / S[i % 3]));
 function points(arr, m, box, quant) { // quant: the app's normalized uint16 in the data box (the GPU dequantises), else floats
@@ -519,7 +520,7 @@ function thinSel() { // an app item's selection: the points of its run that its 
 const pop = h('div', 'dm dm-pop'), ph = h('div', 'dm-ph1'), px = btn('dm-px', 'Zatvori slojeve', svg(XP));
 const msg = h('div', 'dm-msg', LOADING), rows = h('div', 'dm-rows'), ar = h('i', 'dm-ar');
 const lab = h('div', 'dm-ol'), val = h('span', 'num'), sl = h('input', 'dm-sl');
-Object.assign(sl, { type: 'range', min: 0, max: 100, value: 80 });
+Object.assign(sl, { type: 'range', min: 0, max: 100, value: OPACITY * 100 });
 sl.setAttribute('aria-label', 'Neprozirnost oštećenja');
 sl.oninput = () => {
   opacity = sl.value / 100; val.textContent = pct(opacity); sl.style.setProperty('--p', opacity); // --p: the blue fill
