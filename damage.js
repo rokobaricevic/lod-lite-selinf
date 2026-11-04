@@ -117,11 +117,12 @@ function patch(s) {
   s.fragmentShader = s.fragmentShader.replace('void main() {', '#ifdef SIZE_OUT\nlayout( location = 1 ) out highp vec4 pc_fragSize;\n' +
     'varying float vSz;\n#endif\nvoid main() {').replace('#include <premultiplied_alpha_fragment>', '#include <premultiplied_alpha_fragment>\n#ifdef SIZE_OUT\n' +
     'pc_fragSize = vec4( vSz, 0.0, 0.0, 1.0 );\n#endif');
-  // MASK_INLINE: the mask is the scene target's 2nd attachment: the class colour scaled to a max channel of 1 (so the
-  // coverage is its max channel, also after MSAA resolve and mips) and, in alpha, the size code (times the coverage)
+  // MASK_INLINE: the mask is the scene target's 2nd attachment: the class colour scaled to r + g + b = 1, so the coverage
+  // is that sum, also after MSAA resolve and mips (an average keeps a sum; a max channel, where classes of different
+  // colours meet, would read low), and, in alpha, the size code (times the coverage)
   s.fragmentShader = s.fragmentShader.replace('void main() {', '#ifdef MASK_INLINE\nlayout( location = 1 ) out highp vec4 pc_mask;\n' +
     'varying float vSz;\n#endif\nvoid main() {').replace('#include <premultiplied_alpha_fragment>', '#include <premultiplied_alpha_fragment>\n#ifdef MASK_INLINE\n' +
-    'pc_mask = vec4( diffuse / max( max( diffuse.r, diffuse.g ), max( diffuse.b, 1e-3 ) ), vSz );\n#endif');
+    'pc_mask = vec4( diffuse / max( diffuse.r + diffuse.g + diffuse.b, 1e-3 ), vSz );\n#endif');
   // HALF_RES: a half-size mask has no depth buffer of the bridge's size: test against its depth texture here
   if ('HALF_RES' in this.defines) {
     s.uniforms.tBridge = post.U.tDepth;
@@ -166,7 +167,7 @@ const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost ošt
 const classMat = (color, voxel, opacity) => (POST ? mat(color, 1.5 * voxel, 2.5, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ)
   : mat(color, 1.5 * voxel, 2.5, { transparent: true, opacity, depthWrite: false }));
 const selMat = classMat(0xffffff, 0.01, OPACITY), SEL_LIGHT = Math.min(1, Math.max(0, knob('dmsel', 0.45))); // ?dmsel=: how far toward white
-function selColor(c) { // c's colour as drawn (POST: the mask keeps a colour at a max channel of 1), SEL_LIGHT of the way to white
+function selColor(c) { // c's colour as drawn (POST: the composite shows a colour at a max channel of 1), SEL_LIGHT of the way to white
   const col = new THREE.Color(c.color), s = {};
   if (POST) col.multiplyScalar(1 / Math.max(col.r, col.g, col.b, 1e-3));
   col.getRGB(s, THREE.SRGBColorSpace);
@@ -199,12 +200,15 @@ vec3 srgb( vec3 c ) { return mix( c * 12.92, 1.055 * pow( c, vec3( 1.0 / 2.4 ) )
 float lv( float spx ) { return max( 0.0, log2( kSig * spx / 0.65 ) - LOFF ); } // LOFF: the mask's level 0 is level LOFF of the screen
 float spxAt( float d ) { return max( minPx, sprite * pxPerM / ( exp2( d * logFar ) - 1.0 ) ); }
 float level( float d ) { return lv( spxAt( d ) ); }
+// the mask's coverage, its coverage-weighted size code, and its colour
 #ifdef PACKED
-float cov( vec4 m ) { return max( max( m.r, m.g ), m.b ); } // the mask's coverage and its coverage-weighted size code
+float cov( vec4 m ) { return m.r + m.g + m.b; }
 float szc( vec2 uv, float l, vec4 m ) { return m.a; }
+vec3 hue( vec4 m ) { return m.rgb / max( max( m.r, m.g ), max( m.b, 1e-3 ) ); }
 #else
 float cov( vec4 m ) { return m.a; }
 float szc( vec2 uv, float l, vec4 m ) { return textureLod( tSize, uv, l ).r; }
+vec3 hue( vec4 m ) { return m.rgb / max( m.a, 1e-3 ); }
 #endif
 vec4 cubicW( float v ) {
   vec4 n = vec4( 1.0, 2.0, 3.0, 4.0 ) - v, s = n * n * n;
@@ -251,13 +255,13 @@ void main() {
   vec4 m = mix( bspline( L0 ), bspline( L0 + 1.0 ), L - L0 );
   float t = mix( thrS, thr, clamp( ( spx - minPx ) / ( outRef - minPx ), 0.0, 1.0 ) ); // thrS: around the smallest sprites
   float B = cov( m ), sd = ( B - t ) / max( fwidth( B ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
-  vec3 col = srgb( m.rgb / max( B, 1e-3 ) ), o = mix( base, col, opacity * inner );
+  vec3 col = srgb( hue( m ) ), o = mix( base, col, opacity * inner );
   float ow = outPx * clamp( spx / outRef, 0.4, 1.0 ); // thinner around small sprites (far away), which it would drown
   if ( ow > 0.0 ) o = mix( o, col * 0.3, min( 1.0, opacity + 0.2 ) * ( clamp( sd + ow + 0.5, 0.0, 1.0 ) - inner ) );
   gl_FragColor = vec4( o, 1.0 );
 #elif MODE == 0
   vec4 m = texelFetch( tMask, px >> int( LOFF ), 0 );
-  gl_FragColor = vec4( mix( base, srgb( m.rgb / max( cov( m ), 1e-3 ) ), opacity * cov( m ) ), 1.0 );
+  gl_FragColor = vec4( mix( base, srgb( hue( m ) ), opacity * cov( m ) ), 1.0 );
 #else
   gl_FragColor = vec4( base, 1.0 );
 #endif
@@ -461,8 +465,8 @@ function thinAll(now) { // thinMm changed
 const thinLine = () => `${tstat.pts.toLocaleString()} pts in ${tstat.n} jobs: ${tstat.ms.toFixed(0)} ms ${thinWorker ? 'worker' : 'main thread'}, ` +
   `${(tstat.t1 - tstat.t0).toFixed(0)} ms wall, sort ${tstat.sort.toFixed(1)} ms` + (LOD ? `, bands ${tstat.band.toFixed(0)} ms` : '');
 function thinLocal(id) { // no module Worker (or thin.js failed in one): the same job on this thread
-  (thinMod ??= import(thinURL.href)).then((m) => { const w = thinWait.get(id); thinWait.delete(id); w?.res(m.job(w.msg)); })
-    .catch((e) => { console.warn('[thin] unavailable:', e.message); thinWait.get(id)?.res(null); thinWait.delete(id); });
+  const w = thinWait.get(id), end = (t) => { thinWait.delete(id); w.res(t); }; // settles even if the job throws
+  (thinMod ??= import(thinURL.href)).then((m) => m.job(w.msg)).then(end, (e) => { console.warn('[thin]', e); end(null); });
 }
 function thinJob(msg, done) { // {pos, runs, voxel, base?, scale?} -> done(t) (null: no thinning); lod.damageBusy until all are done
   if (!tstat.n++) tstat.t0 = performance.now();
