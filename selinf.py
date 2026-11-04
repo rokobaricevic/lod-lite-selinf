@@ -337,11 +337,12 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None):
     class H(SimpleHTTPRequestHandler):
         extensions_map = {".html": "text/html", ".js": "text/javascript", ".json": "application/json",   # not the
                           ".glb": "model/gltf-binary"}   # Windows registry's guess: a module script must come as JS
+        PAGES = ("/viewer.html", "/selinf.js", "/damage.js", "/thin.js")   # the page and its scripts: the only code served
 
         def end_headers(self):
             # the page and its scripts: never stored (iOS Safari restores a tab from its cache even under no-cache, so
             # an old viewer ran against the new server); tiles and data: revalidate (a rebuilt tile keeps its url)
-            page = urlsplit(self.path).path in ("/", "/viewer.html", "/selinf.js", "/damage.js", "/thin.js")
+            page = urlsplit(self.path).path in ("/", *self.PAGES)
             self.send_header("Cache-Control", "no-store" if page else "no-cache")
             super().end_headers()
 
@@ -370,7 +371,7 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None):
             path = "/viewer.html" if path == "/" else path
             if path == "/out/found/found.json":   # rewritten within a second, it would still be 304 Not Modified
                 del self.headers["If-Modified-Since"]
-            if path in ("/viewer.html", "/selinf.js", "/damage.js", "/thin.js") or path.startswith("/out/") and os.path.isfile(self.translate_path(path)):
+            if path in self.PAGES or path.startswith("/out/") and os.path.isfile(self.translate_path(path)):
                 self.path = path   # nothing else under root: source/, work/, job/ and the code stay private
                 return super().do_GET()
             self.send_error(404)

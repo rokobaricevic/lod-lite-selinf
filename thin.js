@@ -108,8 +108,7 @@ function walk(img, W, a, b, D8) { // from node a through b along degree-2 pixels
 const steps = (path, W) => { let L = 0; for (let i = 1; i < path.length; i++) { const d = Math.abs(path[i] - path[i - 1]); L += d === 1 || d === W ? 1 : Math.SQRT2; } return L; };
 
 // distance (metres) from each of the n points P (xyz) to the centreline of the crack they make: t[i] in UNIT steps
-// (FAR: beyond 63.5 mm). voxel: the class's bake voxel; the raster cell. Returns t (and, for tests, o.paths: the
-// centreline polylines in plane coordinates, and o.uv: the points in them).
+// (FAR: beyond 63.5 mm). voxel: the class's bake voxel; the raster cell. Returns t.
 export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
   if (n === 0) return t;
   if (n < 3) { t.fill(0); return t; }
@@ -124,8 +123,8 @@ export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
     c *= Math.sqrt((W * H) / MAX_PX) * 1.01;
   }
   const ox = u0 - PAD * c, oy = v0 - PAD * c, N = W * H;
-  const D8 = [1, -W + 1, -W, -W - 1, -1, W - 1, W, W + 1], pix = new Int32Array(n), occ = new Uint8Array(N), tmp = new Uint8Array(N);
-  for (let i = 0, j = 0; i < n; i++, j += 2) { const p = Math.floor((uv[j + 1] - oy) / c) * W + Math.floor((uv[j] - ox) / c); pix[i] = p; occ[p] = 1; }
+  const D8 = [1, -W + 1, -W, -W - 1, -1, W - 1, W, W + 1], occ = new Uint8Array(N), tmp = new Uint8Array(N);
+  for (let j = 0; j < 2 * n; j += 2) occ[Math.floor((uv[j + 1] - oy) / c) * W + Math.floor((uv[j] - ox) / c)] = 1;
   // closing (3x3 dilate, then 3x3 erode): fills the 1-cell holes between points; never removes a cell
   for (let y = 1; y < H - 1; y++) for (let x = 1, p = y * W + 1; x < W - 1; x++, p++) tmp[p] = occ[p - 1] | occ[p] | occ[p + 1];
   for (let y = 1; y < H - 1; y++) for (let x = 1, p = y * W + 1; x < W - 1; x++, p++) occ[p] = tmp[p - W] | tmp[p] | tmp[p + W];
@@ -239,8 +238,8 @@ export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
         dx /= L; dy /= L;
         let x = s[end][0], y = s[end][1];
         for (let g = 0; g < 400; g++) {
-          const nx = x + dx * c * 0.5, ny = y + dy * c * 0.5, p = Math.floor((ny - oy) / c) * W + Math.floor((nx - ox) / c);
-          if (!mask[p]) break;
+          const nx = x + dx * c * 0.5, ny = y + dy * c * 0.5;
+          if (!inMask(nx, ny)) break;
           x = nx; y = ny;
         }
         if (end === 0) s.unshift([x, y]); else s.push([x, y]);
@@ -248,7 +247,6 @@ export function centreDist(P, n, voxel, t = new Uint8Array(n), o = {}) {
     }
     lines.push(s);
   }
-  o.paths = lines; o.uv = uv; o.cell = c;
   // each point's distance to the nearest segment: a grid of segments (bins of G), searched ring by ring
   const G = 4 * c, gw = Math.ceil((W * c) / G) + 1, gh = Math.ceil((H * c) / G) + 1, cnt = new Int32Array(gw * gh + 1);
   const seg = [];
