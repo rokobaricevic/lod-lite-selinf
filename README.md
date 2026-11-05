@@ -114,17 +114,32 @@ Python and the job's data. `job/` on the PC holds the job's `job_params.json` an
 
 ## Element faces
 
-Draw an oriented box around a bridge element (a girder, a pier…) in the viewer (`faces.js`): the PC splits the mesh
-surface inside it into flat faces (soffit, webs, flanges…), which the viewer draws. They are only shown, never saved.
-`faces.cpp` (the pybind11 module `faces_core`: no Embree, nothing shared with selinf.cpp) is built from the Survey's
-bake mesh once, when selinf.py starts; if it cannot load, the server runs without it and `/faces` answers 503. Its
-header describes the algorithm and the answer; `test_faces.py` checks it on synthetic meshes (`./test.sh test`).
+Click a bridge element (a girder, an edge beam, a cross-beam, a pier…) in the viewer (`faces.js`): the PC answers it
+as a prism, one cross-section swept along a straight axis, whose faces meet exactly (each profile corner is where two
+face lines cross), and lists the other candidate faces of the section for the owner to turn on and off. It is only
+shown, never saved. `faces.cpp` (the pybind11 module `faces_core`: no Embree, nothing shared with selinf.cpp) is built
+from the Survey's bake mesh once, when selinf.py starts; if it cannot load, the server runs without it and `/element`
+answers 503. Its header describes the algorithm and the answer; `test_faces.py` checks it on synthetic meshes made to
+look like the scan (8-30 cm triangles, ±5 mm noise, 10 % in holes, clutter) with `./test.sh test`.
 
-- `POST /faces {"center": [x,y,z], "axes": [3 rows of 3], "half": [3]}`: the box in the bake frame, in metres, sent as
-  text/plain. Optional keys: `angle_deg` (20: the normals of a face are within this of its direction), `gap_m` (0.05:
-  parallel planes at least this far apart are separate faces), `cell_m` (0.05: the mask's cell) and `min_area_m2`
-  (0.05: smaller faces are dropped).
-- The answer is a uint32 LE n, then a JSON header `{"faces": [{normal, d, origin, u, v, cell, w, h, area, tris}],
-  "tris", "ms"}` padded to a multiple of 4, then each face's w×h uint8 mask (rows along v). A bad request gets 400
-  `{"error"}`.
-- The split takes ~35 ms for 1 M triangles in the box (Mac M5 Pro).
+- `POST /element {"point": [x,y,z], "dir": [x,y,z]}`: the click and its unit view ray in the bake frame, sent as
+  text/plain. Optional keys: `axis` (kept as is: a refit sends the answer's back, so the candidates' keys stay),
+  `on` / `off` (candidate keys forced in / out), `add` (points: the candidate under each forced in), `s0` / `s1` (a
+  forced extent, metres along the axis from the click) and the tuning `window_m` (6), `slab_m` (1.5), `angle_deg`
+  (15), `concave_max_m` (0.5), `element_m` (2.5), `presence` (0.35), `gap_m` (2). Any other key, or a bad value, gets
+  400 `{"error"}`; a click with nothing to fit there 422 `{"error"}`.
+- The answer is JSON: the section frame (`origin`, `axis`, `e1`, `e2`), the extent used and the automatic one, every
+  candidate segment of the section (its line, extent, area; on / auto / seed), the profile's `pieces` (polylines through
+  the corners, a face key per edge) and the `faces`: 4 exact corners per side face, the closed profile for an end cap
+  where the scan closes an end, each with its width, length and the share the scan covers.
+- How: the clicked plane (the triangles facing the viewer there) gives the axis: of the bridge's directions (L, T, Z) and
+  the local faces' cross products, the one across which that plane is narrowest. The triangles in a 3 m slab around
+  the click, projected along it, give the candidate lines (per normal direction the offsets' modes; per line only the
+  stretches seen along most of the slab, so brackets, posts and stiffeners drop out). From the clicked one a chain grows
+  through convex corners (a short concave face ends a side) to faces ending within 2.5 m. The extent runs both ways
+  while the scan covers 35 % of the profile, across gaps of up to 2 m; an automatic axis is then tilted to the
+  element's own drift along it (the girders run 0.3° off the bridge's L) and the fit redone.
+- 6-16 ms a click on the PC's 1 M-triangle bake mesh (Mac M5 Pro).
+- `probe_faces.py <mesh.obj> <dir>` runs it on clicks on Petrinja's bridge (edge beams, road, soffit, a cross-beam, the
+  main girder, the duct, the river banks, the abutments) and draws each: the section with every candidate and the chosen
+  profile, and the faces over the scan, seen from two sides. The real mesh, not the synthetic tests, is the judge.
