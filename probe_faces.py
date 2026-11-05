@@ -8,6 +8,10 @@ coloured by candidate segment, every candidate line with its key -- on solid, of
 bold with its corners), and the swept faces over the triangle centres near them, seen along e2 (a plan, for a
 horizontal axis) and along e1. The probes are clicks on Petrinja's bridge (Most Volontera): a point on the surface
 and the view ray, the surface's inward normal. `--only name,...` runs some of them.
+
+`--clicks` asks instead what the owner gets: ~150 rays cast from cameras beside, below and above the bridge and at its
+ends, each hit labelled by the element it lands on, and per element how many different profiles element gives (side
+faces' widths within 2 cm, extent within 0.5 m) and how many fail; the PNGs are the minority profiles'.
 """
 
 import json
@@ -155,18 +159,165 @@ def axis_name(a, frame):   # the nearest of the global L, T, Z and the angle to 
     return f"{'LTZ'[k]} {np.degrees(np.arccos(min(1.0, abs(np.dot(a, frame[k]))))):.1f}"
 
 
+# --clicks: clicks as the owner makes them -- rays from cameras beside, below and above the bridge and at its ends,
+# through a grid of screen directions, onto the mesh -- each labelled by the element it lands on. Bridge frame: x along
+# L from the triangle centres' median, y along T from theirs, z up. A camera: name, eye, look-at, (columns, rows, half
+# field of view in degrees).
+CAMERAS = (("beside_left", (-4, -16, 1.0), (-4, -5, 0.0), (5, 3, 22)), ("beside_left_far", (9, -16, 0.4), (9, -5, -0.3), (5, 3, 22)),
+           ("beside_right", (-4, 15, 1.0), (-4, 5, 0.0), (5, 3, 22)), ("beside_right_far", (9, 15, 0.4), (9, 5, -0.3), (5, 3, 22)),
+           ("below", (-3, -1, -4.4), (-3, -1, 0), (5, 3, 35)), ("below_far", (7, 1.5, -4.3), (7, 1.5, 0), (5, 3, 35)),
+           ("below_girder", (2, -6.5, -3.0), (2, -4.4, -0.5), (5, 3, 25)), ("above", (0, -12, 7), (0, 0, 0.0), (5, 3, 25)),
+           ("abutment_left", (-9, 0, -1.5), (-17, 0, -1.5), (4, 3, 25)), ("abutment_right", (12, 0, -1.5), (19, 0, -1.5), (4, 3, 25)),
+           ("bank_left", (-4.5, 10, -2.5), (-4.5, 0, -4.2), (4, 3, 25)), ("bank_right", (7.5, 10, -2.5), (7.5, 0, -4.8), (4, 3, 25)))
+
+
+def label(x, y, z, n):   # the element at a point of the bridge frame, its normal n along (L, T, Z): from the slices
+    nl, nt, nz = n
+    if -2.8 < z < -0.4 and abs(nl) > 0.7 and (-17.6 < x < -15.3 or 18.8 < x < 19.8):
+        return "abutment_" + ("left" if x < 0 else "right")
+    if z < -2.0:
+        if z < -5.8 and -1.6 < x < 4.8:
+            return "channel"
+        return "bank_left" if -8 < x < -1.5 else "bank_right" if 4.8 < x < 10.5 else "ground"
+    if x < -17.5 or x > 20.5:
+        return "approach"
+    if 1.2 < y < 2.4 and -0.6 < z < -0.15:
+        return "pipe"
+    if -7.7 < y < -6.95 or 6.45 < y < 7.2:
+        return ("railing_" if z > 1.0 else "edge_") + ("left" if y < 0 else "right")
+    if abs(y) > 7.2:
+        return "other"
+    if 1.3 < y < 2.8 and z < -0.6:
+        return "duct"
+    for side, yg in (("left", -4.35), ("right", 3.8)):
+        if abs(y - yg) < 0.35:
+            if z > 1.0:
+                return f"girder_{side}_top"
+            if z < -0.4 and nz < -0.7:
+                return f"girder_{side}_bottom"
+            return f"girder_{side}_web_" + ("out" if (nt < 0) == (side == "left") else "in")
+    if z > 0.1 and (y < -4.6 or y > 4.1):   # the sidewalks: their tops, their undersides
+        return ("walk_" if nz > 0.7 else "walk_under_") + ("left" if y < 0 else "right")
+    if -3.5 < y < 3.0 and z > 0.4 and nz > 0.7:
+        return "road"
+    if z < 0.25 and -4.0 < y < 3.5:
+        if nz < -0.7 and z > -0.2:
+            return "soffit"
+        k = round((x - 2.95) / 2.8)
+        if abs(x - (2.95 + 2.8 * k)) < 0.35:
+            return f"rib_{k}"
+    return "other"
+
+
+def cast(o, d, V, F, mesh):   # the triangle the ray o + t d hits first, facing it: (point, its normal), or None
+    N, _, C = mesh
+    w = C - o
+    t = w @ d
+    k = np.flatnonzero((t > 0) & (np.einsum("ij,ij->i", w, w) - t * t < 1.5 ** 2) & (N @ d < 0))
+    a, e1, e2 = V[F[k, 0]], V[F[k, 1]] - V[F[k, 0]], V[F[k, 2]] - V[F[k, 0]]
+    p = np.cross(d, e2)
+    det = np.einsum("ij,ij->i", e1, p)
+    inv = 1 / np.where(np.abs(det) > 1e-12, det, np.inf)
+    s = o - a
+    u = np.einsum("ij,ij->i", s, p) * inv
+    q = np.cross(s, e1)
+    v, tt = (q @ d) * inv, np.einsum("ij,ij->i", e2, q) * inv
+    hit = (u >= 0) & (v >= 0) & (u + v <= 1) & (tt > 0)
+    if not hit.any():
+        return None
+    j = int(np.argmin(np.where(hit, tt, np.inf)))
+    return o + tt[j] * d, N[k[j]]
+
+
+def clicks(faces, V, F, mesh, out):
+    """Clicks from CAMERAS, each answered and labelled; per element: the distinct profiles element gives (the side
+    faces' widths within 2 cm, the extent's ends within 0.5 m) and the failures (no answer, shorter than 1 m, narrower
+    than 5 cm, covered under 25 %, an axis over 3 deg off L / T / Z). Writes the minority profiles' PNGs to out."""
+    L, T, Z = (np.array(g) for g in faces.frame)
+    C = mesh[2]
+    o = np.median(C @ L) * L + np.median(C @ T) * T   # the bridge frame's origin (z = 0 stays the bake frame's)
+    world = lambda x, y, z: o + x * L + y * T + z * Z  # noqa: E731
+    rows = []
+    for name, eye, at, (nx, ny, fov) in CAMERAS:
+        e, f = world(*eye), world(*at) - world(*eye)
+        f /= np.linalg.norm(f)
+        r = np.cross(f, Z)
+        r = r / np.linalg.norm(r) if np.linalg.norm(r) > 1e-6 else L
+        u = np.cross(r, f)
+        for ax in np.linspace(-fov, fov, nx):
+            for ay in np.linspace(-fov * 0.6, fov * 0.6, ny):
+                d = f + np.tan(np.radians(ax)) * r + np.tan(np.radians(ay)) * u
+                d /= np.linalg.norm(d)
+                hit = cast(e, d, V, F, mesh)
+                if hit is None:
+                    continue
+                p, n = hit
+                x, y = (p - o) @ L, (p - o) @ T
+                rows.append((label(x, y, p[2], (n @ L, n @ T, n @ Z)), f"{name} {ax:+.0f} {ay:+.0f}", p, d))
+    stats, failures, ms = {}, 0, []
+    for lab, tag, p, d in rows:
+        try:
+            r = json.loads(faces.element(p, d))
+        except LookupError as exc:
+            stats.setdefault(lab, []).append((tag, p, d, None, f"no element: {exc}"))
+            failures += lab not in ("ground", "approach", "other")
+            continue
+        side = [fc for fc in r["faces"] if fc["key"][0] != "c"]
+        widths = sorted(fc["width"] for fc in side)
+        cover = sum(fc["coverage"] * fc["area"] for fc in side) / max(sum(fc["area"] for fc in side), 1e-9)
+        a, org = np.array(r["axis"]), np.array(r["origin"])
+        g = max((L, T, Z), key=lambda g: abs(a @ g))
+        ends = sorted(((org + s * a) - o) @ g for s in (r["s0"], r["s1"]))
+        off = np.degrees(np.arccos(min(1.0, abs(a @ g))))
+        why = ("shorter than 1 m" if r["s1"] - r["s0"] < 1 else "narrower than 5 cm" if sum(widths) < 0.05 else
+               "covered under 25 %" if cover < 0.25 else f"axis {off:.1f} deg off" if off > 3 and not lab.startswith(("bank", "ground", "channel", "other", "approach")) else "")
+        failures += bool(why)
+        stats.setdefault(lab, []).append((tag, p, d, (widths, ends, r), why))
+        ms.append(r["ms"])
+    print(f"\n{len(rows)} clicks; {failures} failures ({100 * failures / max(len(rows), 1):.0f} %); ms median {np.median(ms):.1f}, "
+          f"90 % {np.percentile(ms, 90):.1f}, max {max(ms):.1f}")
+    print(f"{'element':24} {'clicks':>6} {'profiles':>8} {'fail':>4}  the main profile: widths (m), extent ends along its axis (m)")
+    out.mkdir(parents=True, exist_ok=True)
+    for lab in sorted(stats):
+        groups = []   # [(widths, ends, [results])]
+        for tag, p, d, res, why in stats[lab]:
+            if res is None:
+                continue
+            for gw, ge, members in groups:
+                if len(gw) == len(res[0]) and all(abs(x - y) <= 0.02 for x, y in zip(gw, res[0])) and \
+                        all(abs(x - y) <= 0.5 for x, y in zip(ge, res[1])):
+                    members.append((tag, p, d, res))
+                    break
+            else:
+                groups.append((res[0], res[1], [(tag, p, d, res)]))
+        groups.sort(key=lambda gr: -len(gr[2]))
+        fails = [why for *_, why in stats[lab] if why]
+        top = groups[0] if groups else ((), (0, 0), [])
+        print(f"{lab:24} {len(stats[lab]):6} {len(groups):8} {len(fails):4}  " +
+              (f"{[round(w, 2) for w in top[0]]} [{top[1][0]:.1f}, {top[1][1]:.1f}]" if groups else "") +
+              (f"   other: {', '.join(str([round(w, 2) for w in gr[0]]) + f'x{len(gr[2])}' for gr in groups[1:4])}" if len(groups) > 1 else "") +
+              (f"   fail: {'; '.join(sorted(set(fails)))[:90]}" if fails else ""))
+        if lab not in ("ground", "approach", "other"):
+            for k, (gw, ge, members) in enumerate(groups[1:3], 1):   # a minority profile, drawn
+                tag, p, d, res = members[0]
+                draw(res[2], f"{lab} {tag}", mesh, out / f"{lab}_{k}.png")
+
+
 def main(argv):
     if len(argv) < 2:
         sys.exit(__doc__)
-    only = None
+    only, many = None, "--clicks" in argv
     if "--only" in argv:
         i = argv.index("--only")
         only, argv = set(argv[i + 1].split(",")), argv[:i] + argv[i + 2:]
+    argv = [a for a in argv if a != "--clicks"]
     t = time.perf_counter()
     V, F = read_obj(argv[0])
     print(f"{argv[0]}: {len(V)} vertices, {len(F)} triangles read in {time.perf_counter() - t:.1f} s")
     faces, mesh = faces_core.Faces(V, F), mesh_arrays(V, F)
     out = Path(argv[1])
+    if many:
+        return clicks(faces, V, F, mesh, out)
     out.mkdir(parents=True, exist_ok=True)
     print(f"{'probe':24} {'axis':6} {'extent':>17} {'cover':>5} {'rms mm':>6} {'ms':>5}  faces (width x length, m)")
     for name, (point, view) in PROBES.items():
