@@ -83,7 +83,7 @@ clicks on 127.0.0.1:8765, behind a login (`LOGIN`, default test / test). The pub
 leaving the PC through Tailscale (Funnel, or a tunnel over the tailnet) is capped at ~1 MB/s, plain TCP is not.
 
 ```
-./test.sh test          # Mac: build selinf_core, run test_selinf.py
+./test.sh test          # Mac: build selinf_core + faces_core, run test_selinf.py + test_faces.py
 ./test.sh data          # copy source/ work/ out/ into the PC folder (~10 GB)
 ./test.sh               # PC: copy the code, build, test, swap in, start; tunnel to the Mac's 127.0.0.1:8765, open it
 ./test.sh public on     # prints https://<random>.trycloudflare.com/ for anyone with the login; off | status
@@ -94,3 +94,20 @@ The one link to lynceus: selinf reads, and never writes, a lynceus checkout (`SE
 `C:\dev\lynceus`, the Mac's `~/dev/lynceus` for the tests): the inference stage's model code, the worker venv's
 Python and the job's data. `job/` on the PC holds the job's `job_params.json` and `photos.json` and the click log
 `clicks.jsonl`. Its history up to 2026-10-30 is lynceus's `experiments/selective_inference` (commit ffd6b2e9).
+
+## Element faces
+
+Draw an oriented box around a bridge element (a girder, a pier…) in the viewer (`faces.js`): the PC splits the mesh
+surface inside it into flat faces (soffit, webs, flanges…), which the viewer draws. They are only shown, never saved.
+`faces.cpp` (the pybind11 module `faces_core`: no Embree, nothing shared with selinf.cpp) is built from the Survey's
+bake mesh once, when selinf.py starts; if it cannot load, the server runs without it and `/faces` answers 503. Its
+header describes the algorithm and the answer; `test_faces.py` checks it on synthetic meshes (`./test.sh test`).
+
+- `POST /faces {"center": [x,y,z], "axes": [3 rows of 3], "half": [3]}`: the box in the bake frame, in metres, sent as
+  text/plain. Optional keys: `angle_deg` (20: the normals of a face are within this of its direction), `gap_m` (0.05:
+  parallel planes at least this far apart are separate faces), `cell_m` (0.05: the mask's cell) and `min_area_m2`
+  (0.05: smaller faces are dropped).
+- The answer is a uint32 LE n, then a JSON header `{"faces": [{normal, d, origin, u, v, cell, w, h, area, tris}],
+  "tris", "ms"}` padded to a multiple of 4, then each face's w×h uint8 mask (rows along v). A bad request gets 400
+  `{"error"}`.
+- The split takes ~35 ms for 1 M triangles in the box (Mac M5 Pro).
