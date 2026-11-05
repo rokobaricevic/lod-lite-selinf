@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 build/
 selinf_core.*
+faces_core.*
 out-*/
 build.log
 .DS_Store

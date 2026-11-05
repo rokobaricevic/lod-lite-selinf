@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # The whole stack runs on the PC, in C:\Users\rokob\lod-lite-selinf: selinf.py serves the viewer, its tiles and the
 # clicks on the PC's 127.0.0.1:8765, behind the login LOGIN (default test:test).
-#   ./test.sh               PC: copy this folder's code, build selinf_core (MSVC) and run test_selinf.py there; then swap
-#                           it in for the running server, start selinf.py (GPU), tunnel it to 127.0.0.1:8765, open the viewer
+#   ./test.sh               PC: copy this folder's code, build selinf_core + faces_core (MSVC) and run test_selinf.py +
+#                           test_faces.py there; then swap it in for the running server, start selinf.py (GPU), tunnel it
+#                           to 127.0.0.1:8765, open the viewer
 #   ./test.sh data          PC: copy source/ work/ out/ (the viewer's tiles, lod.py build's inputs) into the PC folder
 #   ./test.sh damage        PC: damage.py (the app's damage + photo crops) -> out\damage there, then a copy in out/ here
 #   ./test.sh public on     publish the PC server on the internet (a Cloudflare quick tunnel over TCP); off | status
 #   ./test.sh stop          stop the PC server and the tunnel
-#   ./test.sh test          Mac: fetch pybind11 + Embree headers (once), build selinf_core, run test_selinf.py
+#   ./test.sh test          Mac: fetch pybind11 + Embree headers (once), build selinf_core + faces_core, run test_selinf.py
+#                           + test_faces.py
 # In the viewer: the inference button, then click the bridge (or alt-click it).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -34,7 +36,9 @@ if [ "${1:-}" = test ]; then
     -I build/pybind11/include -I build/embree/include \
     -I "$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')" selinf.cpp "$EMB" -o "$OUT"
   install_name_tool -change /DLC/embreex/.dylibs/libembree4.4.dylib "$EMB" "$OUT"
-  SELINF_REPO="${SELINF_REPO:-$HOME/dev/lynceus}" "$PY" -m pytest -q test_selinf.py
+  clang++ -O3 -std=c++17 -shared -undefined dynamic_lookup -ffp-contract=off -fvisibility=hidden -I build/pybind11/include \
+    -I "$("$PY" -c 'import sysconfig; print(sysconfig.get_paths()["include"])')" faces.cpp -o "faces_core${OUT#selinf_core}"
+  SELINF_REPO="${SELINF_REPO:-$HOME/dev/lynceus}" "$PY" -m pytest -q test_selinf.py test_faces.py
   exit
 fi
 
@@ -206,21 +210,23 @@ Remove-Item -LiteralPath "$root\next.tgz"
 PS
 pc "$STEP"
 
-echo "PC: building selinf_core (MSVC)"
+echo "PC: building selinf_core and faces_core (MSVC)"
 ps STEP <<'PS'
 $d = "$root\deps"; $vc = 'C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Build\vcvars64.bat'
 Set-Content -LiteralPath "$root\next\build.bat" -Encoding ASCII -Value (@(
   '@echo off', "call `"$vc`"", "cd /d $root\next",
   ("cl /nologo /O2 /std:c++17 /EHsc /bigobj /MD /LD /fp:precise /D_USE_MATH_DEFINES /I$d\pybind11\include " +
    "/I$d\embree\include /I$d\python\tools\include selinf.cpp /link /LIBPATH:$d\python\tools\libs " +
-   "/LIBPATH:$d\embree\lib embree4.lib /OUT:selinf_core.cp311-win_amd64.pyd")) -join "`r`n")
+   "/LIBPATH:$d\embree\lib embree4.lib /OUT:selinf_core.cp311-win_amd64.pyd || exit /b 1"),
+  ("cl /nologo /O2 /std:c++17 /EHsc /bigobj /MD /LD /I$d\pybind11\include /I$d\python\tools\include faces.cpp " +
+   "/link /LIBPATH:$d\python\tools\libs /OUT:faces_core.cp311-win_amd64.pyd || exit /b 1")) -join "`r`n")
 & cmd /c "$root\next\build.bat"; Check 'the build'
 PS
 pc "$STEP" || { echo "test.sh: the PC build failed; the running server was not touched" >&2; exit 1; }
 
-echo "PC: test_selinf.py in next (the scheduled task LodSelinf_selinf-test)"
+echo "PC: test_selinf.py + test_faces.py in next (the scheduled task LodSelinf_selinf-test)"
 ps STEP <<'PS'
-Start-Py 'selinf-test' "$root\next" '-m pytest -q test_selinf.py'
+Start-Py 'selinf-test' "$root\next" '-m pytest -q test_selinf.py test_faces.py'
 PS
 pc "$PS_START" "$STEP"
 ps STEP <<'PS'
