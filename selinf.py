@@ -8,6 +8,9 @@ POST /click {"origin": [x,y,z], "direction": [x,y,z]} (a camera ray, bake frame)
   n bytes of JSON header, then each layer's float32 xyz; an error -> 500, the same form with {"error": ...}. A find is
   saved (FoundStore, out/found/) and the header gains "found": its item and "replaced": [the ids it replaced].
 POST /found/delete {"id": "p7"} -> {"ok": true, "id": "p7"}; an unknown id -> 404 {"error": ...}.
+POST /faces {"center": [3], "axes": [3 rows of 3], "half": [3]} (bake frame; optional angle_deg, gap_m, cell_m,
+  min_area_m2; text/plain: no CORS preflight) -> faces_core's answer (faces.cpp: the flat faces of the mesh in that box);
+  a bad request -> 400, no faces_core -> 503, the same form with {"error": ...}.
 SELINF_AUTH=user:pass: every request needs that HTTP Basic login (./test.sh starts the server so).
 SELINF_REPO: the lynceus checkout whose pipeline code, worker venv and job data this reads; it never writes there.
 """
@@ -327,17 +330,27 @@ def with_found(store, core, body):
     return len(text).to_bytes(4, "little") + text + body[4 + n:]
 
 
-def server(core, infer, classes, root, port=8765, auth=None, found=None):
+def framed(head):   # an answer that is only a header (an error): uint32 LE n, the JSON padded to a multiple of 4
+    text = json.dumps(head).encode()
+    text += b" " * (-len(text) % 4)
+    return len(text).to_bytes(4, "little") + text
+
+
+FACES_OPTS = ("angle_deg", "gap_m", "cell_m", "min_area_m2")   # POST /faces's optional keys = split's tuning
+
+
+def server(core, infer, classes, root, port=8765, auth=None, found=None, faces=None):
     """The viewer (root's viewer.html, selinf.js and out/) and the clicks, on 127.0.0.1:port. With auth ("user:pass")
     every request needs that HTTP Basic login: the public address forwards here. found: a FoundStore that keeps the
-    finds (None: nothing is saved)."""
+    finds (None: nothing is saved). faces: a faces_core.Faces of the mesh for POST /faces (None: it answers 503)."""
     lock = threading.Lock()
     login = auth and ("Basic " + base64.b64encode(auth.encode()).decode()).encode()
 
     class H(SimpleHTTPRequestHandler):
         extensions_map = {".html": "text/html", ".js": "text/javascript", ".json": "application/json",   # not the
                           ".glb": "model/gltf-binary"}   # Windows registry's guess: a module script must come as JS
-        PAGES = ("/viewer.html", "/selinf.js", "/damage.js", "/thin.js")   # the page and its scripts: the only code served
+        # the page and its scripts: the only code served
+        PAGES = ("/viewer.html", "/selinf.js", "/damage.js", "/thin.js", "/faces.js")
 
         def end_headers(self):
             # the page and its scripts: never stored (iOS Safari restores a tab from its cache even under no-cache, so
@@ -385,6 +398,8 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None):
             route = urlsplit(self.path).path
             if route == "/found/delete":
                 return self.delete()
+            if route == "/faces":
+                return self.faces()
             if route != "/click":
                 return self.send_error(404)
             try:
@@ -394,9 +409,23 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None):
                     if found is not None:
                         body = with_found(found, core, body)
             except Exception as exc:  # noqa: BLE001 -- the viewer shows it
-                head = json.dumps({"error": repr(exc)}).encode()
-                head += b" " * (-len(head) % 4)
-                body, code = len(head).to_bytes(4, "little") + head, 500
+                body, code = framed({"error": repr(exc)}), 500
+            self.reply(code, body, "application/octet-stream")
+
+        def faces(self):   # POST /faces {"center", "axes", "half", FACES_OPTS...} (text/plain: no CORS preflight)
+            if faces is None:
+                return self.reply(503, framed({"error": "this server has no element faces (faces_core did not load)"}),
+                                  "application/octet-stream")
+            try:   # no lock: split only reads the mesh, takes ~50 ms and releases the GIL
+                req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if not isinstance(req, dict) or set(req) - {"center", "axes", "half", *FACES_OPTS}:
+                    raise ValueError(f'expected {{"center", "axes", "half"}}, optionally {", ".join(FACES_OPTS)}')
+                body, code = faces.split(req["center"], req["axes"], req["half"],
+                                         **{k: float(req[k]) for k in FACES_OPTS if k in req}), 200
+            except (ValueError, TypeError, KeyError) as exc:   # not JSON, a key missing, a box split refuses
+                body, code = framed({"error": repr(exc)}), 400
+            except Exception as exc:  # noqa: BLE001 -- the viewer shows it
+                body, code = framed({"error": repr(exc)}), 500
             self.reply(code, body, "application/octet-stream")
 
         def delete(self):   # POST /found/delete {"id": ...} (text/plain: no CORS preflight)
@@ -432,11 +461,20 @@ if __name__ == "__main__":
     core = selinf_core.Survey(str(REPO / "data"), str(WORK), models.grids)
     print(f"survey + models loaded in {time.perf_counter() - t:.0f} s: {len(core.names)} photos, grids {models.grids}",
           flush=True)
+    try:   # the element faces (POST /faces) are an extra: without them the server runs and /faces answers 503
+        import faces_core
+
+        t = time.perf_counter()
+        faces = faces_core.Faces(*core.mesh())
+        print(f"faces: {faces.tris} triangles in {time.perf_counter() - t:.1f} s", flush=True)
+    except Exception as exc:  # noqa: BLE001
+        faces = None
+        log(f"faces: off: {exc!r}")
     shas = {Path(p["name"]).stem.lower(): p["sha256"] for p in json.loads((WORK / "photos.json").read_bytes())}
     found = FoundStore(ROOT / "out" / "found", params["values"], shas, REPO / "data" / "assets")
     print(f"{len(found.items)} saved finds in {found.dir}", flush=True)
     auth = os.environ.get("SELINF_AUTH")
     srv = server(core, models.infer, (job / "inference" / "classes.txt").read_text().split(), ROOT, auth=auth,
-                 found=found)
+                 found=found, faces=faces)
     print(f"serving http://127.0.0.1:{srv.server_address[1]}/" + (" (login required)" if auth else ""), flush=True)
     srv.serve_forever()
