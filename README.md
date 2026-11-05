@@ -161,7 +161,8 @@ look like the scan (8-30 cm triangles, ±5 mm noise, 10 % in holes, clutter) wit
   offsets' modes; per line only the stretches seen at most stations, so brackets, posts and stiffeners drop out), each
   fitted robustly (Tukey's biweight at 3 cm), snapped onto the section's axes when that moves it 2 cm at most, linked
   faces within 4° of square made square. Collinear pieces are one face across a hole, and a steel plate's skin across
-  whatever joins it (a girder's web through the deck slab); a web's two skins and a flange's are thin plates. From the
+  whatever joins it (a girder's web through the deck slab); a web's two skins and a flange's are thin plates (a skin the
+  scan runs on into the plate it meets still turns that corner). From the
   clicked face a chain grows through convex corners and through a steel section's own concave ones (web to flange,
   round a flange back to the web's other skin) -- not into a slab, a haunch, a soffit or a curb -- so a click anywhere
   on a main girder gives the whole I, closed. A thin plate's two skins are one element: the profile of an element with

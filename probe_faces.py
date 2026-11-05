@@ -165,8 +165,9 @@ def axis_name(a, frame):   # the nearest of the global L, T, Z and the angle to 
 # --clicks: clicks as the owner makes them -- rays from cameras beside, below and above the bridge and at its ends,
 # through a grid of screen directions, onto the mesh -- each labelled by the element it lands on. Bridge frame: x along
 # L from the triangle centres' median, y along T from theirs, z up. A camera: name, eye, look-at, (columns, rows, half
-# field of view in degrees). The last six (2026-11-05): the main girders above the deck from the road and from the
-# sidewalks, and the cross-beams' sides from under the deck, looking along the bridge both ways.
+# field of view in degrees). Then (2026-11-05): the main girders above the deck from the road and from the sidewalks,
+# and the cross-beams' sides from under the deck, looking along the bridge both ways; the last four: the right girder's
+# top flange from above and its bottom flange from below outside, the cross-beams near either girder from under the deck.
 CAMERAS = (("beside_left", (-4, -16, 1.0), (-4, -5, 0.0), (5, 3, 22)), ("beside_left_far", (9, -16, 0.4), (9, -5, -0.3), (5, 3, 22)),
            ("beside_right", (-4, 15, 1.0), (-4, 5, 0.0), (5, 3, 22)), ("beside_right_far", (9, 15, 0.4), (9, 5, -0.3), (5, 3, 22)),
            ("below", (-3, -1, -4.4), (-3, -1, 0), (5, 3, 35)), ("below_far", (7, 1.5, -4.3), (7, 1.5, 0), (5, 3, 35)),
@@ -175,7 +176,9 @@ CAMERAS = (("beside_left", (-4, -16, 1.0), (-4, -5, 0.0), (5, 3, 22)), ("beside_
            ("bank_left", (-4.5, 10, -2.5), (-4.5, 0, -4.2), (4, 3, 25)), ("bank_right", (7.5, 10, -2.5), (7.5, 0, -4.8), (4, 3, 25)),
            ("road_left", (-7, 0, 1.6), (-2, -4.3, 1.3), (5, 3, 20)), ("road_right", (7, -0.5, 1.6), (2, 3.8, 1.3), (5, 3, 20)),
            ("walk_left", (-3, -6.3, 1.8), (3, -4.4, 1.25), (5, 3, 18)), ("walk_right", (3, 6.0, 1.8), (-3, 3.9, 1.25), (5, 3, 18)),
-           ("under_ribs_a", (-9, -1, -1.3), (-1, -1, -0.3), (5, 3, 18)), ("under_ribs_b", (11, 0.5, -1.3), (3, 0.5, -0.3), (5, 3, 18)))
+           ("under_ribs_a", (-9, -1, -1.3), (-1, -1, -0.3), (5, 3, 18)), ("under_ribs_b", (11, 0.5, -1.3), (3, 0.5, -0.3), (5, 3, 18)),
+           ("above_girder_right", (-3, 2.0, 4.5), (1, 3.8, 1.7), (5, 3, 12)), ("below_girder_right", (2, 6.5, -3.0), (2, 3.9, -0.5), (5, 3, 25)),
+           ("under_ribs_c", (-9, 2.3, -1.3), (-1, 2.3, -0.3), (5, 3, 18)), ("under_ribs_d", (11, -2.5, -1.3), (3, -2.5, -0.3), (5, 3, 18)))
 GIRDERS = (("left", -4.335, 0.0035), ("right", 3.775, 0.006))   # a girder's web centre: y = y0 + k x (they run off L)
 
 

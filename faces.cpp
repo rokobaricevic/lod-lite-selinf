@@ -66,7 +66,7 @@
 //        girder, nor a sidewalk through it to the safety strip, 0.7 m on);
 //      - a noisy surface drawn as two bands (same-facing within 5 deg, rms 2.5 cm, 20 cm apart where they overlap by
 //        0.5 m: a soffit on a 3 deg slope) is one face, along the line through both (total least squares);
-//      - a thin plate: two skins facing apart within 12 deg, 10 cm apart at most (steel here 4-8 cm, concrete 15 cm and
+//      - a thin plate: two skins facing apart within 15 deg, 10 cm apart at most (steel here 4-8 cm, concrete 15 cm and
 //        more), overlapping along half the shorter; a plate standing on another plate's skin splits it (a girder's web on
 //        its bottom flange's top, one line either side of it);
 //      - linked faces within 4 deg of square or of parallel are made exactly so (from the faces on e1 / e2 and the
@@ -74,7 +74,8 @@
 //      Keys: the order by normal angle, offset, start; the same for the same point, axis and tuning.
 //   5. the chain. A profile is walked with the material on its left: segment i's end meets segment j's start where the
 //      lines cross up to 25 cm beyond both ends but only a little inside either (4-10 cm, a quarter of its length: not
-//      a T), or, within 20 deg of parallel, where the ends are within 25 cm: a joint, a short edge between them (round
+//      a T; up to 25 cm when that end lies inside the other's thin plate: a web's skin the scan runs on 12 cm into its
+//      bottom flange, which it does not come out of), or, within 20 deg of parallel, where the ends are within 25 cm: a joint, a short edge between them (round
 //      a plate's tip, when nothing is within 2-15 cm beyond it at 35 % of the stations; a step). A corner is convex when
 //      j turns into i's material. From the seed segment, a step at each end in turn through the closest link (a segment
 //      under 20 cm at a 10 cm handicap; when that may not be taken, one within 10 cm of it that may) to a segment ending
@@ -160,7 +161,8 @@ static constexpr int NS = 16, NSMAX = 256;              // stations: pass 1's sl
 static constexpr double STEP2 = 0.5, STEP2A = 1.0;      // pass 2b, 2a: a station STATION2 long every STEP2(A) along the element
 static constexpr double TUKEY_M = 0.03, MODE_BIN = 0.005;   // a line's offset: its offsets' mode, then Tukey's biweight
 static constexpr double SQUARE_DEG = 4;                 // linked faces this close to square or to parallel are made so
-static constexpr double PLATE_DEG = 12, PLATE_M = 0.10, PLATE_OVER = 0.5, PLATE_MIN = 0.05;   // a thin plate's two skins
+static constexpr double PLATE_DEG = 15, PLATE_M = 0.10, PLATE_OVER = 0.5, PLATE_MIN = 0.05;   // a thin plate's two skins (a
+                                                        // riveted flange's top is its angles' leg, 14 deg off its bottom)
 static constexpr double LINE_DEG = 3, LINE_M = 0.02, JOIN_M = 0.6, JOIN_PLATE_M = 1.5;   // collinear: one face over a gap
 static constexpr int WRAP_STEPS = 8;                    // round a plate's end (a flange): links at most
 static constexpr double ALT_M = 0.10;                   // a link this much further than the closest may go on instead
@@ -846,11 +848,11 @@ class Faces {
     void choose(Build& b, const std::vector<int64_t>* on, const std::vector<int64_t>* off, const double* add, size_t nadd,
                 const double* org, const Tune& tu) const {
         const int K = (int)b.segs.size();
-        b.links = link_all(b.segs, b.st, b.ns, b.slen);
         b.mate.assign(K, {});
         for (int i = 0; i < K; i++)
             for (int j = i + 1; j < K; j++)
                 if (mates(b.segs[i], b.segs[j])) b.mate[i].push_back(j), b.mate[j].push_back(i);
+        b.links = link_all(b.segs, b.st, b.ns, b.slen, &b.mate);
         // the chain from the clicked face. A thin plate's two skins are one element: when the chain holds a plate's skin,
         // the element is the chain with the chains from the other skins of its plates that it does not hold (and from
         // theirs), and its profile is the chain grown from the element's largest face, with the other skins of its plates
@@ -1853,7 +1855,14 @@ class Faces {
 
     // 5. every link i's end -> j's start (ns > 0, the stations, each `station` long: a plate's tip only where nothing is
     // just beyond it; 0: every one)
-    static std::vector<Link> link_all(const std::vector<Seg>& segs, const std::vector<STri>& st, int ns, double station = 0) {
+    static std::vector<Link> link_all(const std::vector<Seg>& segs, const std::vector<STri>& st, int ns, double station = 0,
+                                      const std::vector<std::vector<int>>* mate = nullptr) {
+        // p lies inside the thin plate of skin j: behind j and behind one of its other skins (within LINE_M)
+        auto in_plate = [&](int j, const double* p) {
+            if (!mate || dot2(segs[j].n, p) - segs[j].c > LINE_M) return false;
+            for (int m : (*mate)[j]) if (dot2(segs[m].n, p) - segs[m].c <= LINE_M) return true;
+            return false;
+        };
         std::vector<Link> links;
         const double par = std::sin(PARALLEL_DEG * PI / 180);
         const int K = (int)segs.size();
@@ -1873,7 +1882,12 @@ class Faces {
                     const double oj = std::clamp(OVER_FRAC * (sj.t1 - sj.t0), OVER_MIN, OVER_M);
                     const double li = std::clamp(REACH_FRAC * (si.t1 - si.t0), REACH_MIN, LINK_M);
                     const double lj = std::clamp(REACH_FRAC * (sj.t1 - sj.t0), REACH_MIN, LINK_M);
-                    if (gi > li || gi < -oi || gj > lj || gj < -oj) continue;
+                    // inside i by more than a little: a T -- unless i's end lies inside j's plate (a web's skin run on into its
+                    // flange, 12 cm, as the scan rounds their corner, the flange's skins 12 cm apart: it does not come out)
+                    double ei[2], ej[2];
+                    at(si, si.t1, ei), at(sj, sj.t0, ej);
+                    if (gi > li || gj > lj || (gi < -oi && !(gi >= -LINK_M && in_plate(j, ei))) || (gj < -oj && !(gj >= -LINK_M && in_plate(i, ej))))
+                        continue;
                     l.gap = std::fabs(gi) + std::fabs(gj), l.convex = x > 0;   // j turns into i's material: n_i . d_j < 0
                 } else {   // near-parallel: a joint between the ends, on one perpendicular to both
                     double ei[2], ej[2], m[2] = {da[0] + (dot2(da, db) >= 0 ? db[0] : -db[0]), da[1] + (dot2(da, db) >= 0 ? db[1] : -db[1])};

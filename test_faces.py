@@ -274,15 +274,17 @@ def half_girder(rng):
     """The right main girder of Petrinja's as the scan has it: a steel I along x (0..20) whose inner web skin (y = +WEB) is
     seen only between the deck's concrete top (z 0.95) and the top flange -- the deck hides it down to the bottom flange --
     and whose top flange's inner underside the scan drew as a fillet's chord, from the flange's tip down to the web at
-    z 1.40, the web's skin running on 15 cm past where they meet (the union of the stations). Its outer skin is whole."""
+    z 1.40, the web's skin running on 15 cm past where they meet (the union of the stations). Its outer skin is whole,
+    and runs on 11 cm into the bottom flange (9.5 cm thick at the web), as the scan rounds their corner; the flange's outer
+    top is its angle's leg, 14 deg off its bottom."""
     q = lambda p0, a, b, step=None: quad(rng, p0, a, b, step)  # noqa: E731
     X, Y, Z = (20, 0, 0), (lambda w: (0, w, 0)), (lambda h: (0, 0, h))
     return join(q((0, -0.25, 1.70), X, Y(0.5)), q((0, -0.25, 1.64), Y(0.25 - WEB), X),   # the top flange: top, outer underside,
                 q((0, -0.25, 1.64), X, Z(0.06), 0.04), q((0, 0.25, 1.64), Z(0.06), X, 0.04),   # tips, the inner chord
                 q((0, WEB, 1.40), (0, 0.25 - WEB, 0.24), X),
-                q((0, -WEB, -0.45), X, Z(2.09)), q((0, WEB, 0.95), Z(0.60), X),      # the web's outer skin; its inner, above the deck
-                q((0, -0.25, -0.45), X, Y(0.25 - WEB)), q((0, -0.25, -0.51), Y(0.5), X),   # the bottom flange: outer top, bottom,
-                q((0, -0.25, -0.51), X, Z(0.06), 0.04), q((0, 0.25, -0.51), Z(0.06), X, 0.04),   # tips
+                q((0, -WEB, -0.558), X, Z(2.198)), q((0, WEB, 0.95), Z(0.60), X),    # the web's outer skin; its inner, above the deck
+                q((0, -0.25, -0.507), X, (0, 0.25 - WEB, 0.057)), q((0, -0.25, -0.545), Y(0.5), X),   # the bottom flange: outer
+                q((0, -0.25, -0.545), X, Z(0.038), 0.02), q((0, 0.25, -0.545), Z(0.095), X, 0.04),   # top, bottom, tips
                 q((0, WEB, 0.95), X, Y(3 - WEB)), q((0, 0.25, -0.45), Y(2.75), X), q((0, 3, -0.45), Z(1.4), X),   # the deck
                 q((-5, -6, -3), (30, 0, 0), (0, 12, 0)))                             # the ground
 
@@ -291,7 +293,8 @@ def test_a_a_plates_two_skins_are_one_element():
     """A thin plate's two skins are one element: the girder's inner web skin, clicked from the road, reaches neither the
     flange (its fillet's chord meets it 15 cm below its end: a T, not a corner) nor the deck (concrete), but its other
     skin reaches the whole girder; the element is grown from its largest face, the inner skin a piece of its own. The
-    same faces from the road, from outside and from below; the deck is still the deck."""
+    same faces from the road, from outside and from below; the deck is still the deck. The outer skin's end lies inside
+    the bottom flange's plate: a corner, not a T -- the bottom flange is the girder's."""
     rng = np.random.default_rng(9)
     scene = Scene(*scanned(rng, *half_girder(rng), R=rot_z(23.5)), rot_z(23.5))
     got = []
@@ -301,6 +304,8 @@ def test_a_a_plates_two_skins_are_one_element():
         widths = sorted(f["width"] for f in side_faces(r))
         assert angle(scene.R.T @ r["axis"], (1, 0, 0)) < 0.5 and len(widths) >= 6, (p, widths)
         assert min(abs(w - 2.09) for w in widths) < 0.03 and min(abs(w - 0.6) for w in widths) < 0.05, (p, widths)   # both skins
+        normals = {tuple(np.round(scene.R.T @ f["normal"]).astype(int)) for f in side_faces(r)}
+        assert {(0, 0, -1), (0, 0, 1), (0, -1, 0)} <= normals, (p, normals)   # the bottom flange's bottom and top, the outer skin
         got.append(widths)
     for w in got[1:]:
         assert len(w) == len(got[0]) and np.allclose(w, got[0], atol=0.02), got
