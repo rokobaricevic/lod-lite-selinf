@@ -85,7 +85,12 @@
 //      drew with fillets), into a plate's skin when the chain's other end meets its other skin (that flange, clicked);
 //      between faces that are not plates' only into one shorter than concave_max_m (0: never), which ends that side --
 //      a slab, a haunch, a soffit or a curb meeting an element is not its. A side that may not go on now is tried again
-//      after the other grows. A path, or a cycle when it closes (a pier, an I-girder). Then the owner's: on (keys), add
+//      after the other grows. A path, or a cycle when it closes (a pier, an I-girder). A thin plate's two skins are one
+//      element: a chain holding a plate's skin is joined by the chains from the other skins of its plates that it does
+//      not hold (and theirs), and the profile is the chain grown from that element's largest face, the other skins of its
+//      plates it does not reach pieces of their own (not one drawn already: facing as it, along half of it, within 5 cm)
+//      -- the same profile whichever face is clicked (the right main girder's web above the deck, between its fillet's
+//      chord and a concrete haunch, reaches neither; its other skin reaches the girder). Then the owner's: on (keys), add
 //      (the segment nearest each point within 15 cm), off (keys, last). The segments that are on link up into pieces:
 //      the chain's links, then the closest that take in a segment the owner turned on.
 //   6. the profile: a vertex is where neighbouring lines meet (a joint's two ends sit on one perpendicular to both);
@@ -628,7 +633,7 @@ class Faces {
         double a[3] = {0, 0, 0}, e1[3] = {0, 0, 0}, e2[3] = {0, 0, 0};
         std::vector<STri> st;
         std::vector<Seg> segs;
-        int seed = -1;
+        int seed = -1, canon = -1;   // the clicked face; the face the profile is grown from
         std::vector<Link> links;
         std::vector<std::vector<int>> mate;   // per segment: the other skins of its thin plate
         std::vector<char> autos, ons;
@@ -846,10 +851,57 @@ class Faces {
         for (int i = 0; i < K; i++)
             for (int j = i + 1; j < K; j++)
                 if (mates(b.segs[i], b.segs[j])) b.mate[i].push_back(j), b.mate[j].push_back(i);
-        std::vector<int> chain = grow(b.segs, b.links, b.mate, b.seed, tu);
+        // the chain from the clicked face. A thin plate's two skins are one element: when the chain holds a plate's skin,
+        // the element is the chain with the chains from the other skins of its plates that it does not hold (and from
+        // theirs), and its profile is the chain grown from the element's largest face, with the other skins of its plates
+        // that it does not reach as pieces of their own -- the same profile whichever of its faces is clicked (a girder's
+        // web clicked above the deck, between a fillet whose chord meets it below its end and a concrete haunch, reaches
+        // neither; its other skin reaches the girder). A skin drawn already (a face of the element facing as it, along
+        // half of it, within PLATE_M / 2: a flange's bevelled top and the level line just above it) is not another. A chain
+        // without a plate (concrete) is its own.
+        b.canon = b.seed;
+        std::vector<int> chain = grow(b.segs, b.links, b.mate, b.seed, tu), extra;
+        {
+            std::vector<char> inE(K, 0), grown(K, 0);
+            std::vector<int> todo;
+            auto take = [&](const std::vector<int>& c) {
+                for (int k : c) if (k >= 0 && !inE[k]) inE[k] = 1, todo.push_back(k);
+            };
+            auto drawn = [&](int m, const std::vector<char>& in) {
+                const Seg& g = b.segs[m];
+                double mid[2];
+                at(g, (g.t0 + g.t1) / 2, mid);
+                for (int k = 0; k < K; k++) {
+                    const Seg& c = b.segs[k];
+                    if (!in[k] || k == m || dot2(c.n, g.n) < std::cos(tu.angle_deg * PI / 180) || std::fabs(dot2(c.n, mid) - c.c) > PLATE_M / 2) continue;
+                    const double dc[2] = {-c.n[1], c.n[0]};
+                    double p0[2], p1[2];
+                    at(g, g.t0, p0), at(g, g.t1, p1);
+                    const double u0 = std::max(c.t0, std::min(dot2(dc, p0), dot2(dc, p1))), u1 = std::min(c.t1, std::max(dot2(dc, p0), dot2(dc, p1)));
+                    if (u1 - u0 >= (g.t1 - g.t0) / 2) return true;
+                }
+                return false;
+            };
+            grown[b.seed] = 1, take(chain);
+            bool plates = false;
+            for (size_t q = 0; q < todo.size(); q++)   // each segment once
+                for (int m : b.mate[todo[q]]) {
+                    plates = true;
+                    if (!inE[m] && !grown[m] && !drawn(m, inE)) grown[m] = 1, take(grow(b.segs, b.links, b.mate, m, tu));
+                }
+            if (plates) {
+                for (int k = 0; k < K; k++) if (inE[k] && b.segs[k].area > b.segs[b.canon].area) b.canon = k;
+                if (b.canon != b.seed) chain = grow(b.segs, b.links, b.mate, b.canon, tu);
+                std::vector<char> inC(K, 0);
+                for (int k : chain) if (k >= 0) inC[k] = 1;
+                for (int k : chain)
+                    if (k >= 0) for (int m : b.mate[k]) if (!inC[m] && !drawn(m, inC)) inC[m] = 1, extra.push_back(m);
+            }
+        }
         bool closed = false;
         b.autos.assign(K, 0), b.ons.assign(K, 0);
         for (int k : chain) if (k >= 0) b.autos[k] = b.ons[k] = 1;
+        for (int k : extra) b.autos[k] = b.ons[k] = 1;
         if (!chain.empty() && chain.back() == -1) closed = true, chain.pop_back();
         if (on) for (int64_t k : *on) if (k >= 0 && k < K) b.ons[k] = 1;
         for (size_t i = 0; i < nadd; i++) {
@@ -864,7 +916,7 @@ class Faces {
             if (best >= 0) b.ons[best] = 1;
         }
         if (off) for (int64_t k : *off) if (k >= 0 && k < K) b.ons[k] = 0;
-        b.pieces = assemble(b.segs, b.links, chain, closed, b.ons, b.autos, b.seed);
+        b.pieces = assemble(b.segs, b.links, chain, closed, b.ons, b.autos, b.canon);
         int njoints = 0;
         for (Piece& pc : b.pieces) {
             const size_t ne = pc.closed ? pc.uv.size() : pc.uv.size() - 1;
@@ -882,9 +934,9 @@ class Faces {
                 b.edges.push_back(e), b.total_len += e.len;
             }
         }
-        const Piece* main = nullptr;
+        const Piece* main = nullptr;   // the element's own: the piece of the face it is grown from
         for (const Piece& pc : b.pieces)
-            if (std::find(pc.segs.begin(), pc.segs.end(), b.seed) != pc.segs.end()) main = &pc;
+            if (std::find(pc.segs.begin(), pc.segs.end(), b.canon) != pc.segs.end()) main = &pc;
         if (!main && !b.pieces.empty()) main = &b.pieces[0];
         if (main) {
             b.poly = main->uv;

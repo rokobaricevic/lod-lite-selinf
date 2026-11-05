@@ -164,7 +164,10 @@ look like the scan (8-30 cm triangles, ±5 mm noise, 10 % in holes, clutter) wit
   whatever joins it (a girder's web through the deck slab); a web's two skins and a flange's are thin plates. From the
   clicked face a chain grows through convex corners and through a steel section's own concave ones (web to flange,
   round a flange back to the web's other skin) -- not into a slab, a haunch, a soffit or a curb -- so a click anywhere
-  on a main girder gives the whole I, closed. The extent runs both ways while the scan covers 35 % of the profile,
+  on a main girder gives the whole I, closed. A thin plate's two skins are one element: the profile of an element with
+  a plate is grown from its largest face (through its plates' other skins), the other skins it does not reach pieces of
+  their own, so it is the same whichever face is clicked (the right girder's web above the deck, which reaches neither
+  its fillet nor the concrete haunch, gives the girder). The extent runs both ways while the scan covers 35 % of the profile,
   across gaps of up to 4 m. Pass 1 (a 3 m slab round the click) finds the face and the element's drift (the girders run
   0.25° off L), pass 2a the element on stations along its extent, pass 2b samples the element's own extent: every
   input fixed to the mesh or the element, so the answer is the same wherever the click is, and a refit along its axis
