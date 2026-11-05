@@ -144,26 +144,35 @@ look like the scan (8-30 cm triangles, ±5 mm noise, 10 % in holes, clutter) wit
   text/plain. Optional keys: `axis` (kept as is: a refit sends the answer's back, so the candidates' keys stay),
   `on` / `off` (candidate keys forced in / out), `add` (points: the candidate under each forced in), `s0` / `s1` (a
   forced extent, metres along the axis from the click) and the tuning `window_m` (6), `slab_m` (1.5), `angle_deg`
-  (15), `concave_max_m` (0.5), `element_m` (2.5), `presence` (0.35), `gap_m` (2). Any other key, or a bad value, gets
+  (15), `concave_max_m` (0: a concrete element takes no concave face), `element_m` (2.5), `presence` (0.35), `gap_m`
+  (4). Any other key, or a bad value, gets
   400 `{"error"}`; a click where no element is recognised 422 `{"error": "Ovdje nije prepoznat element"}` (the viewer
   shows it).
-- The answer is JSON: the section frame (`origin`, `axis`, `e1`, `e2`), the extent used and the automatic one, every
+- The answer is JSON: the section frame (`origin`, `axis`, `e1`, `e2`; `origin` is where the view ray meets the bake
+  mesh, not the point sent: the viewer's LOD tile is 7-12 cm off it), the extent used and the automatic one, every
   candidate segment of the section (its line, extent, area; on / auto / seed), the profile's `pieces` (polylines through
   the corners, a face key per edge) and the `faces`: 4 exact corners per side face, the closed profile for an end cap
   where the scan closes an end, each with its width, length and the share the scan covers.
-- How: the plane under the click (the triangles facing the viewer there) gives the axis: of the bridge's directions
-  (L, T, Z) and the local faces' cross products, the one across which that plane is narrowest. The triangles projected
-  along it give the candidate lines (per normal direction the offsets' modes; per line only the stretches seen at most
-  stations, so brackets, posts and stiffeners drop out). From the clicked one a chain grows through convex corners (a
-  short concave face ends a side) to faces ending within 2.5 m of it. The extent runs both ways while the scan covers
-  35 % of the profile, across gaps of up to 2 m. That is done twice: first on a 3 m slab around the click, which gives
-  the element's own drift (the girders run 0.3° off the bridge's L) and the clicked face's extent; then on stations
-  along all of that extent, on a grid fixed to the mesh, counting only those where the clicked face is seen. So the
-  profile is the element's, not the click's: anywhere on a girder gives the same girder. An answer under 1 m long,
-  5 cm wide or 25 % covered tries the next axis, three at most; then 422.
-- ~10 ms a click on the PC's 1 M-triangle bake mesh (90 % under 12 ms, Mac M5 Pro).
+- How: the view ray picks the clicked face; the plane there gives the axis: of the bridge's directions (L, T, Z) and
+  the local faces' cross products, the one across which that plane is narrowest, or the other when the element is
+  1.5 times as long along it. The triangles projected along it give the candidate lines (per normal direction the
+  offsets' modes; per line only the stretches seen at most stations, so brackets, posts and stiffeners drop out), each
+  fitted robustly (Tukey's biweight at 3 cm), snapped onto the section's axes when that moves it 2 cm at most, linked
+  faces within 4° of square made square. Collinear pieces are one face across a hole, and a steel plate's skin across
+  whatever joins it (a girder's web through the deck slab); a web's two skins and a flange's are thin plates. From the
+  clicked face a chain grows through convex corners and through a steel section's own concave ones (web to flange,
+  round a flange back to the web's other skin) -- not into a slab, a haunch, a soffit or a curb -- so a click anywhere
+  on a main girder gives the whole I, closed. The extent runs both ways while the scan covers 35 % of the profile,
+  across gaps of up to 4 m. Pass 1 (a 3 m slab round the click) finds the face and the element's drift (the girders run
+  0.25° off L), pass 2a the element on stations along its extent, pass 2b samples the element's own extent: every
+  input fixed to the mesh or the element, so the answer is the same wherever the click is, and a refit along its axis
+  is the answer again (the owner's keys stay). An answer under 1 m long, 5 cm wide or 25 % covered tries the next
+  axis, three at most; then 422.
+- ~25 ms a click on the PC's 1 M-triangle bake mesh (median; 90 % under 33 ms, at most ~46; Mac M5 Pro).
 - `probe_faces.py <mesh.obj> <dir>` runs it on clicks on Petrinja's bridge (edge beams, road, soffit, a cross-beam, the
   main girder, the duct, the river banks, the abutments) and draws each: the section with every candidate and the chosen
-  profile, and the faces over the scan, seen from two sides. `--clicks` casts ~150 clicks as the owner makes them
-  (cameras beside, below and above the bridge, at its ends), labels each by element and counts per element the
-  different profiles and the failures. The real mesh, not the synthetic tests, is the judge.
+  profile, and the faces over the scan, seen from two sides. `--clicks` casts ~220 clicks as the owner makes them
+  (cameras beside, below and above the bridge, at its ends, at the girders above the deck from the road and the
+  sidewalks, at the cross-beams' sides), labels each by element (a main girder is one element, any part of it) and
+  counts per element the different profiles, the main one's share and the failures. The real mesh, not the synthetic
+  tests, is the judge.
