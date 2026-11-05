@@ -132,6 +132,11 @@ static constexpr double LINE_DEG = 3, LINE_M = 0.02, JOIN_M = 0.6, JOIN_PLATE_M 
 static constexpr int WRAP_STEPS = 8;                    // round a plate's end (a flange): links at most
 static constexpr double ALT_M = 0.10;                   // a link this much further than the closest may go on instead
 static constexpr double TILT_Q = 0.02;                  // an automatic axis's tilt from L / T / Z: rounded to this (deg)
+static constexpr double LONGER = 1.5;                   // the second candidate axis first when its element is this much longer
+static constexpr double SNAP_MOVE = 0.02;               // a line is snapped onto e1 / e2 when its ends move this at most
+static constexpr double SNAP_D_DEG = 1;                 // a direction of the section's normals: onto e1 / e2 within this
+static constexpr double RIDGE = 0.05;                   // the tilt's least squares: the ridge, a share of the faces' weight
+static constexpr double BAND_DEG = 5, BAND_RMS = 0.025, BAND_M = 0.2, BAND_OVER = 0.5;   // a noisy surface drawn as two bands
 static constexpr double GRID_M = 1.0, GRID_MAX = 4e6;   // the triangle centres' grid: its cell (m), its cells at most
 static constexpr double WC_M = 1.0;                     // pass 2's window is centred on a grid this fine, fixed to the mesh
 static constexpr double RANGE_SNAP = 2.0;               // pass 2's range: out to multiples of this from the mesh's centre
@@ -443,10 +448,24 @@ class Faces {
             lap("pass1");
             return true;
         };
+        // an element runs along its longest: pass 1 along the first two candidates, the second first when its element is
+        // LONGER times as long (a soffit 8 x 36 m between cross-beams 2.8 m apart is narrowest across L or across T,
+        // depending on where it is clicked; along L it is 36 m long, along T 8)
+        Build pre[2];
+        int pre_ok[2] = {-1, -1};   // -1: not run; 0: no element (or not good); 1: good
+        if (!axis && axes.size() > 1) {
+            for (int k = 0; k < 2; k++) pre_ok[k] = pass1(pre[k], axes[k].data()) && good(pre[k]);
+            if (pre_ok[1] == 1 && (pre_ok[0] != 1 || pre[1].as1 - pre[1].as0 > LONGER * (pre[0].as1 - pre[0].as0)))
+                std::swap(axes[0], axes[1]), std::swap(pre[0], pre[1]), std::swap(pre_ok[0], pre_ok[1]);
+        }
         bool found = false;
         for (size_t ai = 0; ai < axes.size() && ai < GATE_TRIES && !found; ai++) {
             Build one, two, three;   // pass 1, 2a, 2b
-            if (!pass1(one, axes[ai].data()) || (!axis && !good(one))) continue;
+            if (ai < 2 && pre_ok[ai] >= 0) {
+                if (!pre_ok[ai]) continue;
+                one = std::move(pre[ai]);
+            } else if (!pass1(one, axes[ai].data()) || (!axis && !good(one)))
+                continue;
             double A[3];   // the axis of the passes that answer: pass 1 again along it, 2a, 2b
             if (axis || !tilt(one, A)) std::copy(one.a, one.a + 3, A);
             if (!axis) quantize(A);
@@ -1008,11 +1027,13 @@ class Faces {
     }
 
     // the axis the element's own faces say: each edge's offset drifts by k_e per metre along it (a least-squares line over
-    // the automatic extent); the tilt tau of the axis in (e1, e2) with n_e . tau = k_e (least squares, weighted by area)
-    // removes it. False: under DRIFT_MIN, or nothing long enough to measure it.
+    // the automatic extent); the tilt tau of the axis in (e1, e2) with n_e . tau = k_e (least squares, weighted by area,
+    // a ridge of RIDGE times the weights: what no face sees stays) removes it. A level axis: its yaw only, from the faces
+    // within 60 deg of vertical (a soffit on a 3 deg slope sees the yaw 20 times too strongly: 1.1 deg of noise). False:
+    // under DRIFT_MIN, or nothing long enough to measure it.
     bool tilt(const Build& b, double* a2) const {
         const int E = (int)b.edges.size();
-        double m[3] = {0, 0, 0}, r[2] = {0, 0};   // the normal equations: [m0 m1; m1 m2] tau = r
+        double m[3] = {0, 0, 0}, r[2] = {0, 0}, my = 0, ry = 0;   // the normal equations: [m0 m1; m1 m2] tau = r; the yaw's
         for (int e = 0; e < E; e++) {
             double w = 0, ws = 0, wss = 0, wo = 0, wos = 0;
             for (int k = 0; k < b.nb; k++) {
@@ -1025,12 +1046,15 @@ class Faces {
             if (!(w > 0) || !(var > DRIFT_SPAN * DRIFT_SPAN * w * w)) continue;
             const double k = (w * wos - ws * wo) / var, * n = b.edges[e].n;
             m[0] += w * n[0] * n[0], m[1] += w * n[0] * n[1], m[2] += w * n[1] * n[1], r[0] += w * k * n[0], r[1] += w * k * n[1];
+            if (std::fabs(n[0]) >= 0.5) my += w * n[0] * n[0], ry += w * k * n[0];
         }
-        const double ridge = 1e-6 * (m[0] + m[2]), d = (m[0] + ridge) * (m[2] + ridge) - m[1] * m[1];
+        const double ridge = RIDGE * (m[0] + m[2]), d = (m[0] + ridge) * (m[2] + ridge) - m[1] * m[1];
         if (!(m[0] + m[2] > 0) || !(d > 0)) return false;
         double tau[2] = {((m[2] + ridge) * r[0] - m[1] * r[1]) / d, ((m[0] + ridge) * r[1] - m[1] * r[0]) / d};
-        if (std::fabs(b.a[2]) < 0.9)   // a level axis stays level: its yaw only, from the faces that see it (a sloped
-            tau[0] = r[0] / (m[0] + ridge), tau[1] = 0;   // face's pitch differs from click to click, 5 cm over 38 m)
+        if (std::fabs(b.a[2]) < 0.9) {   // a level axis stays level: its yaw only, from the faces that see it (a sloped
+            if (!(my > 0)) return false;   // face's pitch differs from click to click, 5 cm over 38 m)
+            tau[0] = ry / my, tau[1] = 0;
+        }
         const double l = std::hypot(tau[0], tau[1]);
         if (!(l >= DRIFT_MIN)) return false;
         if (l > DRIFT_MAX) tau[0] *= DRIFT_MAX / l, tau[1] *= DRIFT_MAX / l;
@@ -1251,6 +1275,10 @@ class Faces {
                 for (int32_t t : close) if (std::fabs(dot(&N[3 * t], c)) < sup) score[i] += A[t];
             }
             const double wmin = *std::min_element(width.begin(), width.end());
+#ifdef FACES_DEBUG
+            for (size_t i = 0; i < cand.size(); i++)
+                fprintf(stderr, "axis cand (%.3f %.3f %.3f) width %.2f score %.2f\n", cand[i][0], cand[i][1], cand[i][2], width[i], score[i]);
+#endif
             for (size_t i = 0; i < cand.size(); i++)
                 if (width[i] <= TIE * wmin + 0.05 && (width[pick] > TIE * wmin + 0.05 || score[i] > score[pick])) pick = i;
         }
@@ -1322,7 +1350,7 @@ class Faces {
                 centre(j, cj);
                 if (dot2(cj, m) >= ca) alive[j] = 0;
             }
-            snap2(m, snap);
+            snap2(m, std::cos(SNAP_D_DEG * PI / 180));   // finding lines: a 3 deg slope is not level (the lines are snapped later)
             dirs.push_back({m[0], m[1]});
         }
         const int nd = (int)dirs.size();
@@ -1509,19 +1537,40 @@ class Faces {
     }
 
     // a segment of its triangles: its normal the mean of its triangles', then of its inliers' (within TUKEY_M of its
-    // offset, Tukey-weighted), snapped onto e1 / e2 within SNAP2_DEG (or `fixed`); its offset robust_c's; its extent the
-    // run p0 -> p1 projected onto it; rms: of all its triangles' offsets from it
+    // offset, Tukey-weighted) -- tls: the line through all its triangles' centres (total least squares, by area), for a
+    // noisy surface drawn as two bands --, snapped onto e1 / e2 within SNAP2_DEG when that moves its ends SNAP_MOVE at
+    // most (a 30 cm flange 3 deg off is snapped, a soffit 5.5 m wide on a 3 deg slope is not); or `fixed`. Its offset
+    // robust_c's; its extent the run p0 -> p1 projected onto it; rms: of all its triangles' offsets from it
     static Seg fit(const std::vector<STri>& st, const std::vector<int>& run, const double* p0, const double* p1, double snap, const SSet& ref,
-                   const double* fixed = nullptr) {
+                   const double* fixed = nullptr, bool tls = false) {
         Seg g{{0, 0}, 0, 0, 0, 0, 0, 0, 0};
         SSet seen;
+        double cq[2] = {0, 0};
         for (int i : run)
             g.n[0] += (double)st[i].a * st[i].m[0], g.n[1] += (double)st[i].a * st[i].m[1], g.area += st[i].a, seen.add(st[i].k0, st[i].k1),
-                g.seed += st[i].seed ? st[i].a : 0;
+                g.seed += st[i].seed ? st[i].a : 0, cq[0] += (double)st[i].a * st[i].q[0], cq[1] += (double)st[i].a * st[i].q[1];
+        const double half = std::hypot(p1[0] - p0[0], p1[1] - p0[1]) / 2;
+        auto snapped = [&](double* m) {   // m onto e1 / e2 when within SNAP2_DEG and its ends move SNAP_MOVE at most
+            double t[2] = {m[0], m[1]};
+            snap2(t, snap);
+            if (half * std::fabs(cross2(t, m)) <= SNAP_MOVE) m[0] = t[0], m[1] = t[1];
+        };
         if (fixed) g.n[0] = fixed[0], g.n[1] = fixed[1];
-        else {
+        else if (tls && g.area > 0) {
+            const double mu[2] = {cq[0] / g.area, cq[1] / g.area};
+            double sxx = 0, sxy = 0, syy = 0;
+            for (int i : run) {
+                const double x = st[i].q[0] - mu[0], y = st[i].q[1] - mu[1];
+                sxx += st[i].a * x * x, sxy += st[i].a * x * y, syy += st[i].a * y * y;
+            }
+            const double th = 0.5 * std::atan2(2 * sxy, sxx - syy);   // the line's direction; its normal across it
+            double m[2] = {-std::sin(th), std::cos(th)};
+            if (dot2(m, g.n) < 0) m[0] = -m[0], m[1] = -m[1];
+            snapped(m);
+            g.n[0] = m[0], g.n[1] = m[1];
+        } else {
             normalize(g.n, 2);
-            snap2(g.n, snap);
+            snapped(g.n);
             g.c = robust_c(st, run, g.n);
             double m[2] = {0, 0};
             for (int i : run) {
@@ -1530,7 +1579,7 @@ class Faces {
                 const double w = st[i].a * (1 - r * r) * (1 - r * r);
                 m[0] += w * st[i].m[0], m[1] += w * st[i].m[1];
             }
-            if (normalize(m, 2)) snap2(m, snap), g.n[0] = m[0], g.n[1] = m[1];
+            if (normalize(m, 2)) snapped(m), g.n[0] = m[0], g.n[1] = m[1];
         }
         g.c = robust_c(st, run, g.n);
         const double d[2] = {-g.n[1], g.n[0]};
@@ -1595,11 +1644,52 @@ class Faces {
                     }
                     bg = gap, bi = i, bj = j;
                 }
-            if (bi < 0) return;
+            if (bi < 0) break;
             double p0[2], p1[2];
             at(segs[bi], segs[bi].t0, p0), at(segs[bj], segs[bj].t1, p1);
             runs[bi].insert(runs[bi].end(), runs[bj].begin(), runs[bj].end());
             segs[bi] = fit(st, runs[bi], p0, p1, snap, ref);
+            segs.erase(segs.begin() + bj), runs.erase(runs.begin() + bj);
+            if (seed == bj) seed = bi;
+            if (seed > bj) seed--;
+        }
+        // a noisy surface drawn as two bands: same-facing segments (within BAND_DEG), neither a plate's skin, one of them
+        // noisy (rms BAND_RMS), BAND_M apart or less where they overlap by BAND_OVER -- a soffit on a 3 deg slope, its
+        // offsets spread over 18 cm, split into two lines overlapping by 1 m -- are one face, along the line through both
+        const double cb = std::cos(BAND_DEG * PI / 180);
+        for (;;) {
+            const int K = (int)segs.size();
+            std::vector<char> plate(K, 0);
+            for (int i = 0; i < K; i++)
+                for (int j = i + 1; j < K; j++)
+                    if (mates(segs[i], segs[j])) plate[i] = plate[j] = 1;
+            int bi = -1, bj = -1;
+            double bd = INFINITY;
+            for (int i = 0; i < K; i++)
+                for (int j = i + 1; j < K; j++) {
+                    const Seg &x = segs[i], &y = segs[j];
+                    if (plate[i] || plate[j] || dot2(x.n, y.n) < cb || std::max(x.rms, y.rms) < BAND_RMS) continue;
+                    const double d[2] = {-x.n[1], x.n[0]};
+                    double a0[2], a1[2], m[2];
+                    at(y, y.t0, a0), at(y, y.t1, a1);
+                    const double u0 = std::max(x.t0, std::min(dot2(d, a0), dot2(d, a1))), u1 = std::min(x.t1, std::max(dot2(d, a0), dot2(d, a1)));
+                    if (!(u1 - u0 >= BAND_OVER)) continue;
+                    at(x, (u0 + u1) / 2, m);
+                    const double dist = std::fabs(dot2(y.n, m) - y.c);
+                    if (dist <= BAND_M && dist < bd) bd = dist, bi = i, bj = j;
+                }
+            if (bi < 0) return;
+            const Seg &x = segs[bi], &y = segs[bj];
+            const double d[2] = {-x.n[1], x.n[0]};
+            double a[4][2];
+            at(x, x.t0, a[0]), at(x, x.t1, a[1]), at(y, y.t0, a[2]), at(y, y.t1, a[3]);
+            int lo = 0, hi = 0;
+            for (int k = 1; k < 4; k++) {
+                if (dot2(d, a[k]) < dot2(d, a[lo])) lo = k;
+                if (dot2(d, a[k]) > dot2(d, a[hi])) hi = k;
+            }
+            runs[bi].insert(runs[bi].end(), runs[bj].begin(), runs[bj].end());
+            segs[bi] = fit(st, runs[bi], a[lo], a[hi], snap, ref, nullptr, true);
             segs.erase(segs.begin() + bj), runs.erase(runs.begin() + bj);
             if (seed == bj) seed = bi;
             if (seed > bj) seed--;
