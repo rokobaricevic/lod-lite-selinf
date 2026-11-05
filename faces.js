@@ -3,12 +3,13 @@
 // its straight axis) swept between two stations, its faces meeting exactly. Over the bridge it is a closed shell (the
 // profile inflated by 3 cm with mitered corners) drawn in front of the scan: each pixel's depth is pulled toward the eye
 // along its ray by bias() (0.2 m at 7 m), so the scan's noise does not poke through it while a thing well in front still
-// hides it, and the parts behind other things show faintly (an x-ray pass). Two handles at its ends drag along the axis.
+// hides it; its parts behind other things are not drawn (the panel shows them). Two handles at its ends drag along the axis.
 // The side panel shows the prism alone in a 3D view of its own, its section (click a segment: in or out) and its faces
 // listed (a candidate hovered there shows over the bridge); full screen on request. On the bridge a click always starts
 // a new element there (the one shown stays, with a pulsing dot at the click, until the answer; a failed pick keeps it),
-// shift-click adds the surface under the cursor, alt-click takes the element's face under the cursor out (lit while the
-// mouse is over it; while the tool is on, an alt-click is not selinf.js's); faces are picked in the panel, Delete drops
+// shift-click adds the surface under the cursor, alt-click takes the element's face under the cursor out (lit while alt
+// is held over it, not where the scan hides it; while the tool is on, an alt-click is not selinf.js's); faces are picked
+// in the panel, Delete drops
 // the picked one, Esc clears. Each change refits: one request in flight, the latest wins, a failure goes back to the
 // answer shown. Display only: nothing is saved. ?selinf=<url>: the server (as selinf.js); ?ewin= ?eslab= ?eangle=
 // ?econcave= ?eelem= ?epresence= ?egap=: the fit's window_m, slab_m, angle_deg, concave_max_m, element_m, presence,
@@ -183,6 +184,9 @@ export function faceUnder(A, G, o, dir) {
 // sit that far in front of it, while a railing post 0.3 m in front of the fascia, seen from 5 m, still hides it
 export const BIAS = [0.12, 0.012, 0.6];
 export const bias = (r, [b0, k, max] = BIAS) => Math.min(b0 + k * r, max, r / 2);
+// the shell met t m along a ray whose first hit on the scan is d m along it (none: null or undefined): hidden there when
+// the scan is in front of it by more than bias(t), as it is drawn (the road 0.5 m before a girder's web below it)
+export const hidden = (t, d, b = BIAS) => d != null && d < t - bias(t, b);
 // the fragment shader's depth for that (vEye: the pixel's point, view space; feBias: b0, k, max; feW: its depth moved bias()
 // toward the eye along its ray): three's logarithmic depth, as viewer.html's renderer has it, else the projection's. Per
 // pixel, not per corner: interpolated from the corners, a quad 36 m long would be pulled by the corners' share of their
@@ -242,9 +246,11 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   const lm = (o) => new LineMaterial({ linewidth: 1, ...o }); // fat lines: CSS px wide, antialiased with the scene
 
   // ---------- over the bridge, in the bake frame (as selinf.js's root). In the scene, not lod.overlays: its MSAA target
-  // smooths them, and they are depth-tested against the bridge, pulled toward the eye by bias() (biased()). Each has an
-  // x-ray twin on the same geometry, drawn where it is behind the bridge (a railing, a girder in front), faint; the picked
-  // face's outline is drawn on top of everything, faintly. Nothing here writes depth
+  // smooths them, and they are depth-tested against the bridge, pulled toward the eye by bias() (biased()). The hovered
+  // and the picked face and the hovered candidate have an x-ray twin on the same geometry, drawn where it is behind the
+  // bridge, faint (one plane: it never stacks); the element's shell and edges have none (its hidden faces lie over one
+  // another and tinted what is in front of them: a girder's lower half through the road); the picked face's outline is
+  // drawn on top of everything, faintly. Nothing here writes depth
   const root = new THREE.Group(); root.rotation.x = -Math.PI / 2; lod.scene.add(root);
   const feBias = { value: new THREE.Vector3(...EBIAS) }; // one uniform for all of them (userData.feBias: a bench may try others)
   function biased(m, xray = false) { // m's depth per pixel as BIAS_GLSL; x-ray: only where that is behind what is drawn
@@ -266,8 +272,7 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   const ghH = new LineSegments2(undefined, lineM({ color: AC, linewidth: 2.25 }));
   const selL = new LineSegments2(undefined, lm({ color: 0xffffff, linewidth: 1.5, transparent: true, opacity: 0.5, depthTest: false, depthWrite: false }));
   shell.renderOrder = 5; hovF.renderOrder = selF.renderOrder = 6; edges.renderOrder = 7; ghH.renderOrder = 8; selL.renderOrder = 9;
-  twin(shell, fillM(0.07, AC, true)); twin(hovF, fillM(0.1, AC, true)); twin(selF, fillM(0.14, 0x9cc3ff, true));
-  twin(edges, lineM({ color: 0xa8cbff, linewidth: 1.25, opacity: 0.3 }, true)); twin(ghH, lineM({ color: AC, linewidth: 1.75, opacity: 0.45 }, true));
+  twin(hovF, fillM(0.1, AC, true)); twin(selF, fillM(0.14, 0x9cc3ff, true)); twin(ghH, lineM({ color: AC, linewidth: 1.75, opacity: 0.45 }, true));
   for (const o of [shell, edges, hovF, selF, ghH, selL]) root.add(o, ...(o.userData.x ? [o.userData.x] : []));
   function setMesh(o, pos, index) { // new geometry (the old one disposed), shared with o's x-ray twin; hidden while empty
     o.geometry.dispose(); o.geometry = new THREE.BufferGeometry(); o.visible = pos.length > 0;
@@ -747,7 +752,8 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
 
   // pointers on the bridge (a click, not a drag; selinf.js's armed tool: its click): a click starts a new element at the
   // point (on the element shown too), shift adds the surface there, alt takes the element's face under the cursor out (its
-  // shell, wherever the ray meets it first). In the capture phase: while the tool is on, an alt-click is not selinf.js's
+  // shell where the ray meets it first, unless the scan hides it there: bridgeFace()). In the capture phase: while the tool is
+  // on, an alt-click is not selinf.js's
   let down = null;
   addEventListener('pointerdown', (e) => {
     if (e.target === el) down = { x: e.clientX, y: e.clientY, slop: e.pointerType === 'touch' ? 10 : 4, skip: e.button !== 0 || lod.inferArmed };
@@ -755,18 +761,39 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   addEventListener('click', (e) => {
     if (!on || e.target !== el || !down || down.skip || Math.hypot(e.clientX - down.x, e.clientY - down.y) > down.slop) return;
     const [o, d] = ray(e);
-    if (e.altKey) { e.stopPropagation(); return drop(faceUnder(ans, G, o, d)); }
+    if (e.altKey) { e.stopPropagation(); return drop(bridgeFace(e)); }
     const hit = lod.pick(lod.ndcOf(e));
     if (!hit) return; // the sky: nothing changes
     const pt = lod.w2src(hit.point);
     if (e.shiftKey && req) { req.add.push(pt); send(); } else start(pt, d);
   }, true);
-  el.addEventListener('pointermove', (e) => { // a mouse over the element: its face under the cursor picked out (what alt-click takes out)
-    if (!on || !ans || e.buttons || e.pointerType !== 'mouse' || drag) return;
-    const id = faceUnder(ans, G, ...ray(e));
-    if (id !== hov) mark(id);
+  function bridgeFace(e) { // the element's face under the pointer where it is drawn (not behind the scan): its key, or null
+    const [o, d] = ray(e), s = ans && G && rayHit(o, d, G.pos, G.index), f = s && ans.faces[G.tris[s.i]];
+    return f && !hidden(s.t, lod.pick(lod.ndcOf(e))?.distance, EBIAS) ? f.key : null; // the scene pick only on the shell
+  }
+  // a mouse over the bridge with alt held: the element's face under it lit (what an alt-click takes out), checked against
+  // the scan (lod.pick: 20-40 ms, no BVH) at most every HOVER_MS; without alt nothing lights (the mouse crossing the road
+  // lit the girder's web hidden below it). hvE: the last pointer over the bridge; hvB: hov is the bridge's
+  const HOVER_MS = 100;
+  let hvE = null, hvT = 0, hvB = false;
+  const unlit = () => { if (hvB) { hvB = false; mark(null); } };
+  function hvAt() {
+    hvT = 0;
+    const id = hvE?.alt && on && ans && !drag ? bridgeFace(hvE) : null;
+    if (id !== hov && (id || hvB)) { hvB = !!id; mark(id); }
+  }
+  el.addEventListener('pointermove', (e) => {
+    if (e.pointerType !== 'mouse') return;
+    hvE = { clientX: e.clientX, clientY: e.clientY, alt: e.altKey };
+    if (!on || !ans || e.buttons || drag || !e.altKey) return unlit();
+    hvT ||= setTimeout(hvAt, HOVER_MS);
   });
-  el.addEventListener('pointerleave', () => { if (on && hov) mark(null); });
+  el.addEventListener('pointerleave', () => { hvE = null; if (on) unlit(); });
+  for (const t of ['keydown', 'keyup']) addEventListener(t, (e) => { // alt pressed or let go over the bridge, the mouse still
+    if (e.key !== 'Alt' || !hvE || hvE.alt === (t === 'keydown')) return;
+    hvE.alt = t === 'keydown';
+    if (hvE.alt && on && ans) hvT ||= setTimeout(hvAt, 0); else unlit();
+  });
   addEventListener('keydown', (e) => {
     if (!on || /INPUT|SELECT|TEXTAREA/.test(e.target.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.key === 'Escape') { if (fs) setFs(false); else if (req) clear(); else setOn(false); }

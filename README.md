@@ -45,9 +45,11 @@ crisp edges, drawn in front of the scan. Each pixel's depth is pulled toward the
 of its distance (at most 0.6 m, never past half way; `?ebias=b0,k,max`), so the scan's noise (±2 cm on clean concrete,
 ±10–20 cm under the deck and on the abutments, plus the tiles' LOD error, ~1 % of the distance) does not poke through it
 in blotches, while what stands well in front still hides it (a railing post 0.3 m before the fascia seen from 5 m; the
-braces ~0.2 m before a girder's web seen from 3 m); the parts behind other things show faintly (an x-ray pass). On the
+braces ~0.2 m before a girder's web seen from 3 m); its parts behind other things are not drawn there (the panel's 3D
+view shows them; only a hovered or picked face shows faintly through what hides it). On the
 bridge a click always starts a new element at that point, on the shown one too; shift-click adds the surface under the
-cursor; alt-click takes out the element's face under the cursor, which lights while the mouse is over it (with the tool
+cursor; alt-click takes out the element's face under the cursor, which lights while alt is held over it (not where the
+scan hides it: the mouse on the road does not take the girder's web below it; with the tool
 on, an alt-click is the tool's, not the selective inference's). Until the answer comes the element shown stays, with a
 pulsing dot at the click and "Računanje…" in the panel; where no element is recognised it stays too, and the hint says
 why. Two handles on the axis drag its ends (the release refits with that extent; "Automatska duljina" lets the scan

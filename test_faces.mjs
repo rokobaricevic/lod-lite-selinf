@@ -4,7 +4,7 @@
 // handle's axis projection, the section's drawing, the depth bias's numbers
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { at, uvs, ends, segDist, edgeNormals, inflate, earcut, edgeFaces, prism, ghosts, gap, rings, faceMesh, rayHit, faceUnder, axisParam, sectionFit, nice, BIAS, bias } from './faces.js';
+import { at, uvs, ends, segDist, edgeNormals, inflate, earcut, edgeFaces, prism, ghosts, gap, rings, faceMesh, rayHit, faceUnder, axisParam, sectionFit, nice, BIAS, bias, hidden } from './faces.js';
 
 const near = (a, b, msg, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${msg}: ${a} vs ${b}`);
 const sub = (a, b) => a.map((x, i) => x - b[i]), dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
@@ -204,6 +204,17 @@ test('faceUnder: the face of the shell a ray meets first (alt-click, hover), fro
   const H = prism(L, D);
   assert.equal(faceUnder(L, H, ...ray([-2, 0.5, 0.5], [0.5, 0.5, 0.5])), 's0');
   assert.equal(faceUnder(L, H, ...ray([0.6, -2, 0.5], [0.6, 0.5, 0.5])), null);
+});
+
+test('hidden: the shell under the cursor counts only where it is drawn, not behind the scan', () => {
+  assert.equal(hidden(7, null), false); // nothing of the scan on the ray (the sky)
+  assert.equal(hidden(7, undefined), false);
+  assert.equal(hidden(7, 7.02), false); // the scan at the face, its noise either side
+  assert.equal(hidden(7, 6.9), false);
+  assert.equal(hidden(7, 7 - bias(7) + 1e-6), false); // just within the bias: drawn
+  assert.equal(hidden(7, 6.5), true); // the road 0.5 m before a girder's web below it
+  assert.equal(hidden(7, 9), false); // the scan behind it
+  assert.equal(hidden(7, 6.9, [0, 0, 0]), true); // no bias: anything before it hides it
 });
 
 test('bias: the shell pulled toward the eye past the scan\'s noise, short of what stands well in front, never past half way', () => {
