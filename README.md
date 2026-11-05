@@ -34,16 +34,24 @@ Prikaži cijeli most (fit), Zumiranje povlačenjem (`R`, also on a phone: one fi
 URL params: `?tileset=`, `?lru=<MB>` (default 3072, 512 on touch devices), `?uncapped` (render as fast as the GPU
 finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
 `?damage=<dir>` (default `out/damage/`), `?found=<dir>` (default `out/found/`), `?title=` (the structure's name in the title pill),
-`?faces` (the element faces tool, below). On touch devices the LOD error target
+`?faces` (the element faces tool, below; `?fcell=` `?fgap=` `?fmin=` `?fangle=` tune its split). On touch devices the LOD error target
 is 32 px (16 elsewhere): iOS Safari kills a tab that holds ~1 GB, and a close view of the deck at full detail does.
 
 Element faces (`faces.js`, loaded only with `?faces`): the dock tool "Plohe elementa". Turned on, a click on the bridge
 drops a 3 m box there (one axis up, one along the camera's horizontal view direction); its gizmo moves, rotates and
 resizes it (keys `1` / `2` / `3` or the panel's buttons: pomak / rotacija / veličina). After the drop and after every
 drag the box goes to the server (`POST /faces`, in the bake frame, as `/click`), which splits the mesh surface inside it
-into flat faces. Each face is drawn as a translucent coloured overlay (its coverage mask as the alpha) and listed with
-its area and orientation (gore / dolje / bočno), plus the total and the server's time; hovering a row picks out its face.
-Display only, nothing is saved. `Esc` removes the box (again: the tool off). `node test_faces.mjs` checks the decoder.
+into flat faces. The viewer asks for a coarse split (`cell_m` 0.10, `gap_m` 0.15, `min_area_m2` 0.25, `angle_deg` 20:
+the PC's bake mesh has triangles up to ~30 cm, and the server's finer defaults cut a 3 m box into 12–17 scraps);
+`?fcell=` `?fgap=` `?fmin=` `?fangle=` override them. The panel (top left: damage.js's inspector is on the right; a
+bottom sheet on a phone) shows the faces alone in a small 3D view of its own, flat grey lit from above with dark
+outlines and numbered: drag to orbit, right/shift-drag to pan, wheel or pinch to zoom at the cursor, double-click (or
+Prikaži sve) to fit; Izo / Odozgo / Sprijeda (along the box's −y) / Bok (along its x) turn to those views. It refits to
+each answer until you orbit. Below it, the faces listed with their area and orientation (gore / dolje / bočno), the
+total and the server's time. Hovering or clicking a face (in the view or the list) picks it out in its colour in the
+view, the list and over the bridge (drawn on top: the bake mesh is coarser than the tiles); a click keeps it, a click
+on empty space clears it. Display only, nothing is saved. `Esc` removes the box (again: the tool off).
+`node test_faces.mjs` checks the decoder and the mask geometry (the triangles and outlines built from each mask).
 
 ## Damage (the app's, from lynceus)
 
