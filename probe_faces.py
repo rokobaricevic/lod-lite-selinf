@@ -9,9 +9,9 @@ bold with its corners), and the swept faces over the triangle centres near them,
 horizontal axis) and along e1. The probes are clicks on Petrinja's bridge (Most Volontera): a point on the surface
 and the view ray, the surface's inward normal. `--only name,...` runs some of them.
 
-`--clicks` asks instead what the owner gets: ~220 rays cast from cameras beside, below and above the bridge, at its
-ends, at the main girders above the deck (from the road and the sidewalks) and at the cross-beams' sides (under the
-deck, along it both ways), each hit labelled by the element it lands on (a main girder is one element, any part of it),
+`--clicks` asks instead what the owner gets: ~280 rays cast from cameras beside, below and above the bridge, at its
+ends, at the main girders above the deck (from the road and the sidewalks), at the right girder's flanges (from above,
+from below outside) and at the cross-beams' sides (under the deck, along it both ways), each hit labelled by the element it lands on (a main girder is one element, any part of it),
 and per element how many different profiles element gives (side faces' widths within 2 cm, extent within 0.5 m), the
 main one's share of the clicks and how many fail; then how many structural elements have at most 2 profiles, the main
 one at 75 % of their clicks or more. The PNGs are the minority profiles'.

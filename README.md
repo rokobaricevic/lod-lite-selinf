@@ -177,8 +177,9 @@ look like the scan (8-30 cm triangles, ±5 mm noise, 10 % in holes, clutter) wit
 - ~25 ms a click on the PC's 1 M-triangle bake mesh (median; 90 % under 33 ms, at most ~46; Mac M5 Pro).
 - `probe_faces.py <mesh.obj> <dir>` runs it on clicks on Petrinja's bridge (edge beams, road, soffit, a cross-beam, the
   main girder, the duct, the river banks, the abutments) and draws each: the section with every candidate and the chosen
-  profile, and the faces over the scan, seen from two sides. `--clicks` casts ~220 clicks as the owner makes them
+  profile, and the faces over the scan, seen from two sides. `--clicks` casts ~280 clicks as the owner makes them
   (cameras beside, below and above the bridge, at its ends, at the girders above the deck from the road and the
-  sidewalks, at the cross-beams' sides), labels each by element (a main girder is one element, any part of it) and
+  sidewalks, at the right girder's top flange from above and its bottom flange from below, at the cross-beams' sides),
+  labels each by element (a main girder is one element, any part of it) and
   counts per element the different profiles, the main one's share and the failures. The real mesh, not the synthetic
   tests, is the judge.
