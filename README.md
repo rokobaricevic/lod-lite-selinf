@@ -34,24 +34,32 @@ Prikaži cijeli most (fit), Zumiranje povlačenjem (`R`, also on a phone: one fi
 URL params: `?tileset=`, `?lru=<MB>` (default 3072, 512 on touch devices), `?uncapped` (render as fast as the GPU
 finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
 `?damage=<dir>` (default `out/damage/`), `?found=<dir>` (default `out/found/`), `?title=` (the structure's name in the title pill),
-`?faces` (the element faces tool, below; `?fcell=` `?fgap=` `?fmin=` `?fangle=` tune its split). On touch devices the LOD error target
+`?faces` (the element tool, below; `?ewin=` `?eslab=` `?eangle=` `?econcave=` `?eelem=` `?epresence=` `?egap=` tune its fit). On touch devices the LOD error target
 is 32 px (16 elsewhere): iOS Safari kills a tab that holds ~1 GB, and a close view of the deck at full detail does.
 
-Element faces (`faces.js`, loaded only with `?faces`): the dock tool "Plohe elementa". Turned on, a click on the bridge
-drops a 3 m box there (one axis up, one along the camera's horizontal view direction); its gizmo moves, rotates and
-resizes it (keys `1` / `2` / `3` or the panel's buttons: pomak / rotacija / veličina). After the drop and after every
-drag the box goes to the server (`POST /faces`, in the bake frame, as `/click`), which splits the mesh surface inside it
-into flat faces. The viewer asks for a coarse split (`cell_m` 0.10, `gap_m` 0.15, `min_area_m2` 0.25, `angle_deg` 20:
-the PC's bake mesh has triangles up to ~30 cm, and the server's finer defaults cut a 3 m box into 12–17 scraps);
-`?fcell=` `?fgap=` `?fmin=` `?fangle=` override them. The panel (top left: damage.js's inspector is on the right; a
-bottom sheet on a phone) shows the faces alone in a small 3D view of its own, flat grey lit from above with dark
-outlines and numbered: drag to orbit, right/shift-drag to pan, wheel or pinch to zoom at the cursor, double-click (or
-Prikaži sve) to fit; Izo / Odozgo / Sprijeda (along the box's −y) / Bok (along its x) turn to those views. It refits to
-each answer until you orbit. Below it, the faces listed with their area and orientation (gore / dolje / bočno), the
-total and the server's time. Hovering or clicking a face (in the view or the list) picks it out in its colour in the
-view, the list and over the bridge (drawn on top: the bake mesh is coarser than the tiles); a click keeps it, a click
-on empty space clears it. Display only, nothing is saved. `Esc` removes the box (again: the tool off).
-`node test_faces.mjs` checks the decoder and the mask geometry (the triangles and outlines built from each mask).
+Element prisms (`faces.js`, loaded only with `?faces`): the dock tool "Odabir elementa". Turned on, a click on the
+bridge sends the point and the view ray to the server (`POST /element`, in the bake frame), which fits the element there
+as a prism: one cross-section swept along a straight axis between two stations, its faces meeting exactly at the
+profile's corners. Over the bridge it is a closed shell, the profile inflated by 3 cm with mitered corners (so it sits just
+outside the scan): translucent, depth-tested, crisp edges. The candidates next to it (within 0.3 m in the section) are
+dashed ghosts, and a click puts one in; shift-click adds the surface under the cursor. Two handles on the axis drag its
+ends (the release refits with that extent; "Automatska duljina" lets the scan decide again). The panel (top left:
+damage.js's inspector is on the right; a bottom sheet on a phone; "Cijeli zaslon": full screen, the Fullscreen API or a
+CSS overlay on iOS, `Esc` leaves) shows the prism alone in a 3D view of its own, lynceus's look (flat grey lambert faces,
+dark edges, the section's outline light at both ends, the other candidates dashed, numbered): drag to orbit,
+right/shift-drag to pan, wheel or pinch to zoom at the cursor, double-click (or Prikaži sve) to fit; Izo / Odozgo /
+Sprijeda (square on, from the click's side) / Bok (along the axis) turn to those views. Below it the section: every
+candidate segment (solid in the element, dashed out), the profile through its corners, the click, a scale bar; a click
+on a segment puts it in or takes it out, the main way to refine it. Then the faces (area, width × length, how much of
+it the scan covers, gore / dolje / bočno, a switch: in or out) and the total (faces, area, length, the server's time).
+Hovering or clicking a face anywhere picks it out everywhere (the list, the 3D view, the section, over the bridge with
+its outline on top); `Delete` takes the picked one out. Every change refits, one request at a time (the latest wins),
+with the answer's axis, so the candidates keep their keys. Display only, nothing is saved. `Esc` clears (again: the tool
+off). `node test_faces.mjs` checks the geometry: the mitered inflation, the shell, the ghosts, the section's drawing,
+the handles' projection. To try it on the Mac without the PC: `~/dev/lynceus/apps/worker/.venv/bin/python dev_faces.py`
+(http://127.0.0.1:8770/viewer.html?faces) serves this folder, a tileset at `/out/` (`--out`, default
+`~/dev/lod-lite-selinf/out-uastc-200k`) and `POST /element`: faces_core on the bake mesh with
+`--mesh build/bake/mesh.obj` (when faces_core imports: `./test.sh test` builds it), else a mock girder at the click.
 
 ## Damage (the app's, from lynceus)
 
