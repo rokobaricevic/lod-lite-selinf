@@ -1,8 +1,9 @@
-// node test_faces.mjs (or node --test): faces.js's decoder on /faces answers built by hand per the wire format: uint32 LE n,
-// n bytes of JSON header padded with spaces to a multiple of 4, then each face's w*h uint8 mask in header order
+// node test_faces.mjs (or node --test): faces.js's decoder on /faces answers built by hand per the wire format (uint32 LE n,
+// n bytes of JSON header padded with spaces to a multiple of 4, then each face's w*h uint8 mask in header order), and its
+// mask geometry (the side view's and the picked face's triangles and outline) on small masks
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decode, corners, facing } from './faces.js';
+import { decode, corners, facing, maskGeometry } from './faces.js';
 
 function answer(head, masks = []) {
   let text = new TextEncoder().encode(JSON.stringify(head));
@@ -39,12 +40,11 @@ test('two faces: header, masks of different sizes, in order', () => {
   assert.equal(at(r.faces[1], 3, 3), 1); assert.equal(at(r.faces[1], 3, 4), 0); assert.equal(at(r.faces[1], 0, 1), 0);
 });
 
-test('corners: origin + w cells along u, h cells along v, lifted along the normal', () => {
+test('corners: origin + w cells along u, h cells along v', () => {
   const [a, b] = decode(answer(head, [mA, mB])).faces;
   close(corners(a), [10, 20, 5, 10.15, 20, 5, 10, 20, 5.1, 10.15, 20, 5.1], 'A');
-  close(corners(a, 0.01), [10, 19.99, 5, 10.15, 19.99, 5, 10, 19.99, 5.1, 10.15, 19.99, 5.1], 'A lifted');
-  const q = corners(b, 0.01), U = [0.4 * c, 0.4 * s, 0], V = [-0.5 * s, 0.5 * c, 0], o = [-1, 2, 7.01];
-  close(q, [...o, ...o.map((x, k) => x + U[k]), ...o.map((x, k) => x + V[k]), ...o.map((x, k) => x + U[k] + V[k])], 'B lifted');
+  const q = corners(b), U = [0.4 * c, 0.4 * s, 0], V = [-0.5 * s, 0.5 * c, 0], o = [-1, 2, 7];
+  close(q, [...o, ...o.map((x, k) => x + U[k]), ...o.map((x, k) => x + V[k]), ...o.map((x, k) => x + U[k] + V[k])], 'B');
   // the face's own plane: every unlifted corner has normal . p = d
   for (const [f, p] of [[a, corners(a)], [b, corners(b)]]) for (let k = 0; k < 4; k++)
     assert.ok(Math.abs(f.normal[0] * p[3 * k] + f.normal[1] * p[3 * k + 1] + f.normal[2] * p[3 * k + 2] - f.d) < 1e-9);
@@ -66,4 +66,54 @@ test('no faces, and a truncated answer', () => {
   const buf = answer(head, [mA, mB]);
   assert.throws(() => decode(buf.slice(0, buf.byteLength - 1)), RangeError); // the last mask is a byte short
   assert.throws(() => decode(new ArrayBuffer(0)), RangeError); // an empty 401
+});
+
+// maskGeometry: the triangles' total area, the outline's total length (and its segment count: collinear runs merged)
+const tri = (P) => {
+  let a = 0;
+  for (let t = 0; t < P.length; t += 9) {
+    const u = [0, 1, 2].map((k) => P[t + 3 + k] - P[t + k]), v = [0, 1, 2].map((k) => P[t + 6 + k] - P[t + k]);
+    a += Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) / 2;
+  }
+  return a;
+};
+const len = (E) => { let l = 0; for (let t = 0; t < E.length; t += 6) l += Math.hypot(E[t + 3] - E[t], E[t + 4] - E[t + 1], E[t + 5] - E[t + 2]); return l; };
+const face = (base, w, h, rows) => ({ ...base, w, h, mask: Uint8Array.from(rows.join('').split('').map(Number)) }); // rows: j = 0 first
+const near = (a, b, msg) => assert.ok(Math.abs(a - b) < 1e-6, `${msg}: ${a} vs ${b}`);
+
+test('maskGeometry: a full 3 x 2 mask is one quad of 6 cells, outlined by its 4 sides', () => {
+  for (const base of [A, B]) { // A: 5 cm cells, u x v = normal; B: 10 cm along a rotated u
+    const f = face(base, 3, 2, ['111', '111']), g = maskGeometry(f, f.origin), q = base.cell ** 2;
+    assert.equal(g.positions.length, 18); near(tri(g.positions), 6 * q, 'area');
+    assert.equal(g.edges.length, 4 * 6); near(len(g.edges), 10 * base.cell, 'outline');
+    for (let t = 0; t < g.positions.length; t += 9) { // counter-clockwise about the normal
+      const u = [0, 1, 2].map((k) => g.positions[t + 3 + k] - g.positions[t + k]), v = [0, 1, 2].map((k) => g.positions[t + 6 + k] - g.positions[t + k]);
+      assert.ok((u[1] * v[2] - u[2] * v[1]) * f.normal[0] + (u[2] * v[0] - u[0] * v[2]) * f.normal[1] + (u[0] * v[1] - u[1] * v[0]) * f.normal[2] > 0);
+    }
+  }
+});
+
+test('maskGeometry: an L, a ring, a diagonal, an empty row between two parts', () => {
+  const q = A.cell;
+  const L = maskGeometry(face(A, 3, 3, ['111', '100', '100']), A.origin); // 5 cells; outline 3 + 1 + 2 + 2 + 1 + 3
+  near(tri(L.positions), 5 * q * q, 'L area'); near(len(L.edges), 12 * q, 'L outline'); assert.equal(L.edges.length / 6, 6);
+  const O = maskGeometry(face(A, 3, 3, ['111', '101', '111']), A.origin); // 8 cells; the outer square and the hole's
+  near(tri(O.positions), 8 * q * q, 'ring area'); near(len(O.edges), 16 * q, 'ring outline'); assert.equal(O.edges.length / 6, 8);
+  const D = maskGeometry(face(A, 3, 3, ['100', '010', '001']), A.origin); // corners touch: 3 squares, 12 sides
+  near(tri(D.positions), 3 * q * q, 'diagonal area'); near(len(D.edges), 12 * q, 'diagonal outline');
+  const G = maskGeometry(face(A, 2, 3, ['11', '00', '11']), A.origin); // a run interrupted: two quads
+  assert.equal(G.positions.length, 36); near(tri(G.positions), 4 * q * q, 'gap area'); near(len(G.edges), 12 * q, 'gap outline');
+  assert.deepEqual(maskGeometry(face(A, 2, 2, ['00', '00']), A.origin), { positions: new Float32Array(0), edges: new Float32Array(0), at: [] });
+});
+
+test('maskGeometry: positions relative to the origin given, the label on a covered cell', () => {
+  const f = face(B, 3, 3, ['111', '100', '100']), o = [-1.25, 2.5, 6.5], g = maskGeometry(f, o), g0 = maskGeometry(f, [0, 0, 0]);
+  near(g.positions[0], f.origin[0] - o[0], 'x'); near(g.positions[1], f.origin[1] - o[1], 'y'); near(g.positions[2], f.origin[2] - o[2], 'z'); // cell (0, 0)
+  g.positions.forEach((x, i) => near(x, g0.positions[i] - o[i % 3], `p ${i}`));
+  g.edges.forEach((x, i) => near(x, g0.edges[i] - o[i % 3], `e ${i}`));
+  for (let i = 0; i < g.positions.length; i += 3) // all in the face's plane
+    near(f.normal.reduce((a, n, k) => a + n * (g.positions[i + k] + o[k]), 0), f.d, 'plane');
+  // the L's centroid (1.1, 1.1 cells) is on no cell: the nearest covered ones are (1, 0) and (0, 1), row 0 first
+  const at = [0, 1, 2].map((k) => f.origin[k] - o[k] + f.cell * (1.5 * f.u[k] + 0.5 * f.v[k]));
+  g.at.forEach((x, k) => near(x, at[k], `at ${k}`));
 });
