@@ -162,13 +162,18 @@ def axis_name(a, frame):   # the nearest of the global L, T, Z and the angle to 
 # --clicks: clicks as the owner makes them -- rays from cameras beside, below and above the bridge and at its ends,
 # through a grid of screen directions, onto the mesh -- each labelled by the element it lands on. Bridge frame: x along
 # L from the triangle centres' median, y along T from theirs, z up. A camera: name, eye, look-at, (columns, rows, half
-# field of view in degrees).
+# field of view in degrees). The last six (2026-11-05): the main girders above the deck from the road and from the
+# sidewalks, and the cross-beams' sides from under the deck, looking along the bridge both ways.
 CAMERAS = (("beside_left", (-4, -16, 1.0), (-4, -5, 0.0), (5, 3, 22)), ("beside_left_far", (9, -16, 0.4), (9, -5, -0.3), (5, 3, 22)),
            ("beside_right", (-4, 15, 1.0), (-4, 5, 0.0), (5, 3, 22)), ("beside_right_far", (9, 15, 0.4), (9, 5, -0.3), (5, 3, 22)),
            ("below", (-3, -1, -4.4), (-3, -1, 0), (5, 3, 35)), ("below_far", (7, 1.5, -4.3), (7, 1.5, 0), (5, 3, 35)),
            ("below_girder", (2, -6.5, -3.0), (2, -4.4, -0.5), (5, 3, 25)), ("above", (0, -12, 7), (0, 0, 0.0), (5, 3, 25)),
            ("abutment_left", (-9, 0, -1.5), (-17, 0, -1.5), (4, 3, 25)), ("abutment_right", (12, 0, -1.5), (19, 0, -1.5), (4, 3, 25)),
-           ("bank_left", (-4.5, 10, -2.5), (-4.5, 0, -4.2), (4, 3, 25)), ("bank_right", (7.5, 10, -2.5), (7.5, 0, -4.8), (4, 3, 25)))
+           ("bank_left", (-4.5, 10, -2.5), (-4.5, 0, -4.2), (4, 3, 25)), ("bank_right", (7.5, 10, -2.5), (7.5, 0, -4.8), (4, 3, 25)),
+           ("road_left", (-7, 0, 1.6), (-2, -4.3, 1.3), (5, 3, 20)), ("road_right", (7, -0.5, 1.6), (2, 3.8, 1.3), (5, 3, 20)),
+           ("walk_left", (-3, -6.3, 1.8), (3, -4.4, 1.25), (5, 3, 18)), ("walk_right", (3, 6.0, 1.8), (-3, 3.9, 1.25), (5, 3, 18)),
+           ("under_ribs_a", (-9, -1, -1.3), (-1, -1, -0.3), (5, 3, 18)), ("under_ribs_b", (11, 0.5, -1.3), (3, 0.5, -0.3), (5, 3, 18)))
+GIRDERS = (("left", -4.335, 0.0035), ("right", 3.775, 0.006))   # a girder's web centre: y = y0 + k x (they run off L)
 
 
 def label(x, y, z, n):   # the element at a point of the bridge frame, its normal n along (L, T, Z): from the slices
@@ -189,13 +194,10 @@ def label(x, y, z, n):   # the element at a point of the bridge frame, its norma
         return "other"
     if 1.3 < y < 2.8 and z < -0.6:
         return "duct"
-    for side, yg in (("left", -4.35), ("right", 3.8)):
-        if abs(y - yg) < 0.35:
-            if z > 1.0:
-                return f"girder_{side}_top"
-            if z < -0.4 and nz < -0.7:
-                return f"girder_{side}_bottom"
-            return f"girder_{side}_web_" + ("out" if (nt < 0) == (side == "left") else "in")
+    for side, y0, k in GIRDERS:   # a main girder, any part: its flanges (+-30 cm), their fillets, its web's two skins
+        dy = abs(y - y0 - k * x)
+        if (dy < 0.3 and (z > 1.6 or z < -0.4)) or (dy < 0.3 and z > 1.35 and nz < 0.3) or (dy < 0.1 and abs(nt) > 0.7):
+            return "girder_" + side
     if z > 0.1 and (y < -4.6 or y > 4.1):   # the sidewalks: their tops, their undersides
         return ("walk_" if nz > 0.7 else "walk_under_") + ("left" if y < 0 else "right")
     if -3.5 < y < 3.0 and z > 0.4 and nz > 0.7:
@@ -204,9 +206,12 @@ def label(x, y, z, n):   # the element at a point of the bridge frame, its norma
         if nz < -0.7 and z > -0.2:
             return "soffit"
         k = round((x - 2.95) / 2.8)
-        if abs(x - (2.95 + 2.8 * k)) < 0.35:
+        if abs(x - (2.95 + 2.8 * k)) < 0.35 and z > -0.65:
             return f"rib_{k}"
     return "other"
+
+
+STRUCTURAL = ("edge_", "walk_left", "walk_right", "girder_", "road", "abutment_", "bank_", "channel", "soffit", "rib_")
 
 
 def cast(o, d, V, F, mesh):   # the triangle the ray o + t d hits first, facing it: (point, its normal), or None
@@ -276,8 +281,9 @@ def clicks(faces, V, F, mesh, out):
         ms.append(r["ms"])
     print(f"\n{len(rows)} clicks; {failures} failures ({100 * failures / max(len(rows), 1):.0f} %); ms median {np.median(ms):.1f}, "
           f"90 % {np.percentile(ms, 90):.1f}, max {max(ms):.1f}")
-    print(f"{'element':24} {'clicks':>6} {'profiles':>8} {'fail':>4}  the main profile: widths (m), extent ends along its axis (m)")
+    print(f"{'element':24} {'clicks':>6} {'profiles':>8} {'main':>5} {'fail':>4}  the main profile: widths (m), extent ends along its axis (m)")
     out.mkdir(parents=True, exist_ok=True)
+    met, structural = [], []
     for lab in sorted(stats):
         groups = []   # [(widths, ends, [results])]
         for tag, p, d, res, why in stats[lab]:
@@ -293,7 +299,12 @@ def clicks(faces, V, F, mesh, out):
         groups.sort(key=lambda gr: -len(gr[2]))
         fails = [why for *_, why in stats[lab] if why]
         top = groups[0] if groups else ((), (0, 0), [])
-        print(f"{lab:24} {len(stats[lab]):6} {len(groups):8} {len(fails):4}  " +
+        share = len(top[2]) / len(stats[lab])   # the main profile's share of the clicks (failures count against it)
+        if lab.startswith(STRUCTURAL):
+            structural.append(lab)
+            if len(groups) <= 2 and share >= 0.75:
+                met.append(lab)
+        print(f"{lab:24} {len(stats[lab]):6} {len(groups):8} {100 * share:4.0f}% {len(fails):4}  " +
               (f"{[round(w, 2) for w in top[0]]} [{top[1][0]:.1f}, {top[1][1]:.1f}]" if groups else "") +
               (f"   other: {', '.join(str([round(w, 2) for w in gr[0]]) + f'x{len(gr[2])}' for gr in groups[1:4])}" if len(groups) > 1 else "") +
               (f"   fail: {'; '.join(sorted(set(fails)))[:90]}" if fails else ""))
@@ -301,6 +312,8 @@ def clicks(faces, V, F, mesh, out):
             for k, (gw, ge, members) in enumerate(groups[1:3], 1):   # a minority profile, drawn
                 tag, p, d, res = members[0]
                 draw(res[2], f"{lab} {tag}", mesh, out / f"{lab}_{k}.png")
+    print(f"structural elements with <= 2 profiles and the main one >= 75 % of their clicks: {len(met)} of {len(structural)}"
+          f" (not: {', '.join(lab for lab in structural if lab not in met)})")
 
 
 def main(argv):

@@ -131,6 +131,10 @@ static constexpr double PLATE_DEG = 12, PLATE_M = 0.10, PLATE_OVER = 0.5, PLATE_
 static constexpr double LINE_DEG = 3, LINE_M = 0.02, JOIN_M = 0.6, JOIN_PLATE_M = 1.5;   // collinear: one face over a gap
 static constexpr int WRAP_STEPS = 8;                    // round a plate's end (a flange): links at most
 static constexpr double ALT_M = 0.10;                   // a link this much further than the closest may go on instead
+static constexpr double TILT_REDO = 0.05;               // pass 2 again when its profile's tilt is this far (deg) off pass 1's
+static constexpr double GRID_M = 1.0, GRID_MAX = 4e6;   // the triangle centres' grid: its cell (m), its cells at most
+static constexpr double WC_M = 1.0;                     // pass 2's window is centred on a grid this fine, fixed to the mesh
+static constexpr double RANGE_SNAP = 2.0;               // pass 2's range: out to multiples of this from the mesh's centre
 static constexpr double LINE_PLATE_M = 0.04;            // a plate's skin: collinear within this (its skins: 3-6 cm, facing apart)
 static constexpr double HINT_DEG = 10, HINT_M = 0.10;   // pass 2's seed segment: on pass 1's seed line within these
 static constexpr double LINK_M = 0.25, OVER_MIN = 0.04, OVER_M = 0.10, OVER_FRAC = 0.25, PARALLEL_DEG = 20, AHEAD_M = 0.05;
@@ -148,7 +152,7 @@ static constexpr int NB = 8, BINS = 6 * NB * NB, MAX_PEAKS = 8, MAX_DIRS = 64;
 
 struct NotFound : std::runtime_error { using std::runtime_error::runtime_error; };   // -> LookupError
 
-struct Tune { double window_m = 6, slab_m = 1.5, angle_deg = 15, concave_max_m = 0.5, element_m = 2.5, presence = 0.35, gap_m = 2.0; };
+struct Tune { double window_m = 6, slab_m = 1.5, angle_deg = 15, concave_max_m = 0, element_m = 2.5, presence = 0.35, gap_m = 2.0; };
 
 template <class A, class B> static inline double dot(const A* a, const B* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 static inline double dot2(const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1]; }
@@ -264,6 +268,9 @@ class Faces {
     double ext[3] = {0, 0, 0};                                      // the bbox's half extents
     std::vector<float> V, N, A, C;      // vertices (n, 3); per triangle: unit normal (0 if degenerate), area, centre
     std::vector<int32_t> F;             // triangles (n, 3)
+    double glo[3] = {0, 0, 0}, gcell = GRID_M;   // the triangle centres' grid in the frame (L, T, Z): its corner, its cell
+    int gn[3] = {1, 1, 1};                       // cells per axis
+    std::vector<int32_t> gstart, gtri;           // cell c holds the triangles gtri[gstart[c] .. gstart[c + 1])
 
     Faces(const double* v, size_t nv, const int64_t* f, size_t nt) : V(3 * nv), N(3 * nt), A(nt), C(3 * nt), F(3 * nt) {
         if (nv > (size_t)INT32_MAX || nt > (size_t)INT32_MAX) throw std::invalid_argument("too many vertices or triangles for int32");
@@ -290,12 +297,45 @@ class Faces {
             for (int k = 0; k < 3; k++) N[3 * t + k] = l > 0 ? (float)(x[k] / l) : 0.f, C[3 * t + k] = (float)((p[0][k] + p[1][k] + p[2][k]) / 3);
         }
         frame();
+        grid();
+    }
+
+    // the triangles whose centres are in the box lo..hi of the frame (L, T, Z) (and some beside it: whole cells), each once
+    template <class Fn> void visit(const double* lo, const double* hi, Fn&& fn) const {
+        int i0[3], i1[3];
+        for (int k = 0; k < 3; k++) {
+            if (!(lo[k] <= hi[k])) return;
+            i0[k] = (int)std::clamp(std::floor((lo[k] - glo[k]) / gcell), 0.0, (double)(gn[k] - 1));
+            i1[k] = (int)std::clamp(std::floor((hi[k] - glo[k]) / gcell), 0.0, (double)(gn[k] - 1));
+        }
+        for (int x = i0[0]; x <= i1[0]; x++)
+            for (int y = i0[1]; y <= i1[1]; y++) {
+                const size_t c0 = ((size_t)x * gn[1] + y) * gn[2];
+                for (int32_t i = gstart[c0 + i0[2]], e = gstart[c0 + i1[2] + 1]; i < e; i++) fn(gtri[i]);
+            }
+    }
+
+    // the box of the frame (L, T, Z) round p + s a + u e1 + v e2, s, u, v in the given ranges (relative to O)
+    void box(const double* p, const double* a, const double* e1, const double* e2, const double* r, double* lo, double* hi) const {
+        const double* G[3] = {L, T, Z};
+        for (int k = 0; k < 3; k++) {
+            const double c = dot(p, G[k]), da = dot(a, G[k]), d1 = dot(e1, G[k]), d2 = dot(e2, G[k]);
+            lo[k] = c + std::min(r[0] * da, r[1] * da) + std::min(r[2] * d1, r[3] * d1) + std::min(r[4] * d2, r[5] * d2);
+            hi[k] = c + std::max(r[0] * da, r[1] * da) + std::max(r[2] * d1, r[3] * d1) + std::max(r[4] * d2, r[5] * d2);
+        }
     }
 
     std::string element(const double* point, const double* dir, const double* axis, const std::vector<int64_t>& on,
                         const std::vector<int64_t>& off, const double* add, size_t nadd, const double* s0f, const double* s1f,
                         const Tune& tu) const {
         const auto start = std::chrono::steady_clock::now();
+#ifdef FACES_DEBUG
+        auto lap = [&](const char* what) {
+            fprintf(stderr, "t %-12s %6.2f ms\n", what, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        };
+#else
+        auto lap = [](const char*) {};
+#endif
         for (int k = 0; k < 3; k++)
             if (!std::isfinite(point[k]) || !std::isfinite(dir[k]) || (axis && !std::isfinite(axis[k])))
                 throw std::invalid_argument("point, dir and axis must be 3 finite numbers");
@@ -322,12 +362,16 @@ class Faces {
         std::vector<Near> near;
         {
             const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, r2 = (float)(reach * reach);
-            const size_t nt = A.size();
-            for (size_t t = 0; t < nt; t++) {
-                const float dx = C[3 * t] - pf[0], dy = C[3 * t + 1] - pf[1], dz = C[3 * t + 2] - pf[2], d2 = dx * dx + dy * dy + dz * dz;
-                if (d2 <= r2) near.push_back({(int32_t)t, d2});
-            }
+            const double* G[3] = {L, T, Z};
+            double lo[3], hi[3];
+            for (int k = 0; k < 3; k++) lo[k] = dot(p, G[k]) - reach, hi[k] = dot(p, G[k]) + reach;
+            visit(lo, hi, [&](int32_t t) {
+                const float dx = C[3 * (size_t)t] - pf[0], dy = C[3 * (size_t)t + 1] - pf[1], dz = C[3 * (size_t)t + 2] - pf[2];
+                const float d2 = dx * dx + dy * dy + dz * dz;
+                if (d2 <= r2) near.push_back({t, d2});
+            });
         }
+        lap("gather");
         int32_t nearest = ray(near, p, sd.vd);   // the first hit: the click moves onto it, to the millimetre
         if (nearest >= 0) {
             for (int k = 0; k < 3; k++) org[k] = std::nearbyint((p[k] + O[k]) * 1000) / 1000, p[k] = org[k] - O[k];
@@ -373,16 +417,47 @@ class Faces {
             } catch (const NotFound&) {
                 continue;
             }
+            lap("pass1 sect");
             choose(one, nullptr, nullptr, nullptr, 0, org, tu);
+            lap("pass1 chain");
             sweep(one, p, tu);
+            lap("pass1 sweep");
             if (!axis && !good(one)) continue;
-            Build two;   // pass 2, along the element's whole extent (pass 1's profile's and the clicked face's), every
-            if (axis || !tilt(one, two.a)) std::copy(one.a, one.a + 3, two.a);   // station counting; the axis tilted to its drift
+            // pass 2, along the element's whole extent (pass 1's profile's and the clicked face's), every station counting,
+            // its window round pass 1's profile, the axis tilted to the element's drift; again with the tilt pass 2's own
+            // profile gives when that is TILT_REDO off pass 1's (which saw only the click's surroundings: a girder's
+            // bottom flange alone tells its yaw badly, 0.1 deg for 0.25, its faces 2-3 cm off at the ends)
+            Build two;
+            if (axis || !tilt(one, two.a)) std::copy(one.a, one.a + 3, two.a);
+            double wc[2] = {0, 0}, lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
+            for (const Edge& e : one.edges)
+                for (const double* x : {e.a, e.b})
+                    for (int k = 0; k < 2; k++) lo[k] = std::min(lo[k], x[k]), hi[k] = std::max(hi[k], x[k]);
+            if (!one.edges.empty()) wc[0] = (lo[0] + hi[0]) / 2, wc[1] = (lo[1] + hi[1]) / 2;
+            const double q0 = std::min({one.as0, one.r0, -tu.slab_m}), q1 = std::max({one.as1, one.r1, tu.slab_m});
+            auto pass2 = [&](Build& t) {
+#ifdef FACES_DEBUG
+                fprintf(stderr, "pass2 range [%.3f, %.3f] wc (%.3f, %.3f) axis (%.6f %.6f %.6f)\n", q0, q1, wc[0], wc[1], t.a[0], t.a[1], t.a[2]);
+#endif
+                section(t, nullptr, p, n0, sd, tu, q0, q1, &one.segs[one.seed], wc);
+                lap("pass2 sect");
+                choose(t, &on, &off, add, nadd, org, tu);
+                lap("pass2 chain");
+                sweep(t, p, tu);
+                lap("pass2 sweep");
+            };
             try {
-                section(two, nullptr, p, n0, sd, tu, std::min({one.as0, one.r0, -tu.slab_m}), std::max({one.as1, one.r1, tu.slab_m}),
-                        &one.segs[one.seed]);
-                choose(two, &on, &off, add, nadd, org, tu);
-                sweep(two, p, tu);
+                pass2(two);
+                double a3[3];
+                if (!axis && tilt(two, a3) && std::acos(std::min(1.0, dot(a3, two.a))) > TILT_REDO * PI / 180) {
+                    Build t3;
+                    std::copy(a3, a3 + 3, t3.a);
+                    try {
+                        pass2(t3);
+                        two = std::move(t3);
+                    } catch (const NotFound&) {
+                    }
+                }
                 if (!axis && !good(two)) two = Build();
             } catch (const NotFound&) {
                 two = Build();
@@ -559,9 +634,10 @@ class Faces {
     // triangles within [r0, r1] of the click along the axis, in NS stations. Null: pass 2, every triangle in the stations
     // STATION2 long every STEP2 at multiples of it from the mesh's centre (a grid fixed to the mesh, not to the click)
     // over [r0, r1], the element's extent: any click on an element samples it alike; the seed segment is then the one
-    // on pass 1's seed line.
+    // on pass 1's seed line. The window: window_m round the click, or round wc (pass 2: pass 1's profile, in its frame --
+    // the road clicked by one curb sees the other, 6.6 m away).
     void section(Build& b, const std::vector<Near>* near, const double* p, const double* n0, const Seed& sd, const Tune& tu,
-                 double r0, double r1, const Seg* hint = nullptr) const {
+                 double r0, double r1, const Seg* hint = nullptr, const double* wc = nullptr) const {
         double* a = b.a;
         if (std::fabs(a[2]) < 0.9) {
             for (int k = 0; k < 3; k++) b.e2[k] = Z[k] - a[2] * a[k];
@@ -575,14 +651,20 @@ class Faces {
         int ns = NS;
         if (near) {
             step = (r1 - r0) / NS, hw = step / 2, sc0 = r0 + hw;
-        } else {   // STEP2 apart (twice that per 128 m past it), at multiples of it from the mesh's centre
+        } else {   // STEP2 apart (twice that per 128 m past it), at multiples of it from the mesh's centre, over [r0, r1]
             const double at = dot(a, p);   // the click along the axis from the mesh's centre
+            r0 = std::floor((r0 + at) / RANGE_SNAP) * RANGE_SNAP - at, r1 = std::ceil((r1 + at) / RANGE_SNAP) * RANGE_SNAP - at;
             for (step = STEP2; (r1 - r0) / step > NSMAX - 1; step *= 2) {}
             hw = STATION2 / 2, sc0 = std::ceil((r0 + at) / step) * step - at, ns = std::clamp((int)std::floor((r1 - sc0) / step) + 1, 1, NSMAX);
         }
         const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, af[3] = {(float)a[0], (float)a[1], (float)a[2]},
                     e1f[3] = {(float)b.e1[0], (float)b.e1[1], (float)b.e1[2]}, e2f[3] = {(float)b.e2[0], (float)b.e2[1], (float)b.e2[2]};
         const float side = (float)std::sin(SIDE_DEG * PI / 180), win2 = (float)(tu.window_m * tu.window_m);
+        float cu = 0.f, cv = 0.f;   // the window's centre in (u, v): wc, on a grid of WC_M from the mesh's centre
+        if (wc) {
+            const double gu = dot(p, b.e1), gv = dot(p, b.e2);
+            cu = (float)(std::nearbyint((wc[0] + gu) / WC_M) * WC_M - gu), cv = (float)(std::nearbyint((wc[1] + gv) / WC_M) * WC_M - gv);
+        }
         auto take = [&](int32_t t, bool seed) {   // triangle t, when its centre is in a station
             const float* c = &C[3 * (size_t)t];
             const float d[3] = {c[0] - pf[0], c[1] - pf[1], c[2] - pf[2]};
@@ -592,7 +674,7 @@ class Faces {
             const float* n = &N[3 * (size_t)t];
             if (!(A[t] > 0) || !(std::fabs(dot(n, af)) < side)) return;
             const float u = (float)dot(d, e1f), v = (float)dot(d, e2f);
-            if (u * u + v * v > win2) return;
+            if ((u - cu) * (u - cu) + (v - cv) * (v - cv) > win2) return;
             const float m[2] = {(float)dot(n, e1f), (float)dot(n, e2f)}, l = std::sqrt(m[0] * m[0] + m[1] * m[1]);
             STri x{{u, v}, {m[0] / l, m[1] / l}, {}, A[t], 0, 0, t, seed};
             double s0 = INFINITY, s1 = -INFINITY;
@@ -610,28 +692,49 @@ class Faces {
         };
         if (near)
             for (const Near& q : *near) take(q.t, is_seed(q, sd));
-        else {
+        else {   // the grid's cells along the stations' box; quick tests first: in a station, then near the axis line
             const float lim = (float)tu.window_m, *cs = C.data(), f0 = (float)sc0, fs = (float)(1 / step), fh = (float)(hw / step);
-            const size_t nt = A.size();
-            for (size_t t = 0; t < nt; t++) {   // quick tests first: in a station, then near the axis line
-                const float d[3] = {cs[3 * t] - pf[0], cs[3 * t + 1] - pf[1], cs[3 * t + 2] - pf[2]};
-                const float x = (d[0] * af[0] + d[1] * af[1] + d[2] * af[2] - f0) * fs, r = x - std::nearbyint(x);
-                if (x < -0.5f || x > ns - 0.5f || std::fabs(r) > fh + 1e-4f) continue;
+            const double r[6] = {sc0 - hw, sc0 + (ns - 1) * step + hw, cu - tu.window_m, cu + tu.window_m, cv - tu.window_m, cv + tu.window_m};
+            double lo[3], hi[3];
+            box(p, a, b.e1, b.e2, r, lo, hi);
+            visit(lo, hi, [&](int32_t t) {
+                const float d[3] = {cs[3 * (size_t)t] - pf[0], cs[3 * (size_t)t + 1] - pf[1], cs[3 * (size_t)t + 2] - pf[2]};
+                const float x = (d[0] * af[0] + d[1] * af[1] + d[2] * af[2] - f0) * fs, rr = x - std::nearbyint(x);
+                if (x < -0.5f || x > ns - 0.5f || std::fabs(rr) > fh + 1e-4f) return;
                 const float u = d[0] * e1f[0] + d[1] * e1f[1] + d[2] * e1f[2];
-                if (u < -lim || u > lim) continue;
+                if (u < cu - lim || u > cu + lim) return;
                 const float v = d[0] * e2f[0] + d[1] * e2f[1] + d[2] * e2f[2];
-                if (v < -lim || v > lim) continue;
-                take((int32_t)t, false);
+                if (v < cv - lim || v > cv + lim) return;
+                take(t, false);
+            });
+        }
+#ifdef FACES_DEBUG
+        const auto t0 = std::chrono::steady_clock::now();
+        auto lap2 = [&](const char* what) {
+            fprintf(stderr, "  s %-10s %6.2f ms (%zu tris)\n", what, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), b.st.size());
+        };
+#else
+        auto lap2 = [](const char*) {};
+#endif
+        // the stations that count: all, or in pass 2 those where pass 1's seed line is seen (the element's own: stations
+        // past its ends dilute nothing); the length they sample. The offsets are binned from the mesh's centre, not from
+        // the click: guv is the click in the section from there.
+        SSet ref;
+        if (hint) {
+            const double hd[2] = {-hint->n[1], hint->n[0]}, ca = std::cos(tu.angle_deg * PI / 180);
+            for (const STri& x : b.st) {
+                const double off = x.q[0] * hint->n[0] + x.q[1] * hint->n[1] - hint->c, t = x.q[0] * hd[0] + x.q[1] * hd[1];
+                if (std::fabs(off) <= HINT_M && x.m[0] * hint->n[0] + x.m[1] * hint->n[1] >= ca && t >= hint->t0 - ALONG_GAP &&
+                    t <= hint->t1 + ALONG_GAP)
+                    ref.add(x.k0, x.k1);
             }
         }
-        // the stations that count: all of them (pass 2's are the element's own extent); the length they sample. The
-        // offsets are binned from the mesh's centre, not from the click: guv is the click in the section from there.
-        SSet ref;
-        ref.add(0, ns - 1);
-        const double len = ns * 2 * hw, guv[2] = {dot(p, b.e1), dot(p, b.e2)};
+        if (ref.count() < 3) ref = SSet(), ref.add(0, ns - 1);
+        const double len = ref.count() * 2 * hw, guv[2] = {dot(p, b.e1), dot(p, b.e2)};
         b.ns = ns, b.slen = 2 * hw;
         std::vector<std::vector<int>> runs;
         std::vector<Seg> segs = segments(b.st, tu, len, ref, guv, runs);
+        lap2("segments");
         double s0n[2] = {dot(n0, b.e1), dot(n0, b.e2)};
         int seed = -1;
         for (size_t i = 0; i < segs.size(); i++)
@@ -662,8 +765,11 @@ class Faces {
                 kept.push_back(segs[i]), kruns.push_back(std::move(runs[i]));
             }
         merge(kept, kruns, b.st, ref, s2);    // collinear segments across a junction or a hole: one face
+        lap2("merge");
         split_t(kept, kruns, b.st, ref, s2);  // a face a thin plate stands on: one either side of it
+        lap2("split");
         regularize(kept, kruns, b.st, ref);   // linked faces nearly square or parallel: exactly
+        lap2("regularize");
         std::vector<int> o(kept.size());   // the keys: by normal angle, offset, start
         std::vector<double> ang(kept.size());
         for (size_t i = 0; i < kept.size(); i++) {
@@ -772,20 +878,23 @@ class Faces {
         std::vector<EF> ef;
         for (const Edge& e : b.edges)
             ef.push_back({{(float)e.n[0], (float)e.n[1]}, {(float)e.d[0], (float)e.d[1]}, {(float)e.a[0], (float)e.a[1]}, (float)e.len, (float)e.c});
-        const size_t nt = A.size();
-        for (size_t t = 0; t < nt; t++) {
+        const double rb[6] = {-b.side * h, b.side * h, u0, u1, v0, v1};   // the grid's cells along the profile's box
+        double blo[3], bhi[3];
+        box(p, b.a, b.e1, b.e2, rb, blo, bhi);
+        visit(blo, bhi, [&](int32_t ti) {
+            const size_t t = (size_t)ti;
             const float* c = &C[3 * t];
             const float dx = c[0] - pf[0], dy = c[1] - pf[1], dz = c[2] - pf[2];
             const float u = dx * e1f[0] + dy * e1f[1] + dz * e1f[2];
-            if (u < u0 || u > u1) continue;
+            if (u < u0 || u > u1) return;
             const float v = dx * e2f[0] + dy * e2f[1] + dz * e2f[2];
-            if (v < v0 || v > v1 || !(A[t] > 0)) continue;
+            if (v < v0 || v > v1 || !(A[t] > 0)) return;
             const float s = dx * af[0] + dy * af[1] + dz * af[2];
             const float* n = &N[3 * t];
             const float na = n[0] * af[0] + n[1] * af[1] + n[2] * af[2];
             if (std::fabs(na) >= capcos) {
                 if (b.poly.size() >= 3 && inside(b.poly, u, v)) b.capt.push_back({s, A[t], na});
-                continue;
+                return;
             }
             const float nu = n[0] * e1f[0] + n[1] * e1f[1] + n[2] * e1f[2], nv = n[0] * e2f[0] + n[1] * e2f[1] + n[2] * e2f[2];
             int best = -1;
@@ -803,7 +912,7 @@ class Faces {
             }
             const int k = std::clamp((int)std::floor(s / h) + b.side, 0, b.nb - 1);
             if (seedy) b.covs[k] += A[t];
-            if (best < 0) continue;
+            if (best < 0) return;
             const double w = A[t];
             double* dr = &b.drift[((size_t)k * E + best) * 5];
             b.cov[(size_t)k * E + best] += w, b.sa[k] += w, b.sd[k] += w * bd * bd, b.cnt[k]++;
@@ -813,7 +922,7 @@ class Faces {
                 const float sv = (x[0] - pf[0]) * af[0] + (x[1] - pf[1]) * af[1] + (x[2] - pf[2]) * af[2];
                 b.vmin[k] = std::min(b.vmin[k], sv), b.vmax[k] = std::max(b.vmax[k], sv);
             }
-        }
+        });
         // the extent of the profile, and of the seed segment's own edges (pass 2's range): the stations where they are
         // present, from the click both ways until gap_m of absent ones
         auto extent = [&](bool seed_only, double& s0, double& s1) {
@@ -921,6 +1030,38 @@ class Faces {
         }
         th = std::fmod(th + (sw > 0 ? sx / sw : 0) + 90, 90.0) * PI / 180;
         L[0] = std::cos(th), L[1] = std::sin(th), L[2] = 0, T[0] = -L[1], T[1] = L[0], T[2] = 0;
+    }
+
+    // the grid of the triangle centres in the frame (L, T, Z): GRID_M cells (twice that while more than GRID_MAX), each
+    // cell's triangles together. The sections and sweeps along L or T visit only the cells along their box.
+    void grid() {
+        const size_t nt = A.size();
+        const double* G[3] = {L, T, Z};
+        double lo[3] = {INFINITY, INFINITY, INFINITY}, hi[3] = {-INFINITY, -INFINITY, -INFINITY};
+        for (size_t t = 0; t < nt; t++)
+            for (int k = 0; k < 3; k++) {
+                const double x = dot(&C[3 * t], G[k]);
+                lo[k] = std::min(lo[k], x), hi[k] = std::max(hi[k], x);
+            }
+        if (!nt) for (int k = 0; k < 3; k++) lo[k] = hi[k] = 0;
+        for (gcell = GRID_M;; gcell *= 2) {
+            double cells = 1;
+            for (int k = 0; k < 3; k++) gn[k] = (int)std::floor((hi[k] - lo[k]) / gcell) + 1, cells *= gn[k];
+            if (cells <= GRID_MAX) break;
+        }
+        std::copy(lo, lo + 3, glo);
+        const size_t nc = (size_t)gn[0] * gn[1] * gn[2];
+        std::vector<int32_t> cell(nt);
+        gstart.assign(nc + 1, 0), gtri.resize(nt);
+        for (size_t t = 0; t < nt; t++) {
+            int i[3];
+            for (int k = 0; k < 3; k++) i[k] = std::clamp((int)std::floor((dot(&C[3 * t], G[k]) - glo[k]) / gcell), 0, gn[k] - 1);
+            cell[t] = (int32_t)(((size_t)i[0] * gn[1] + i[1]) * gn[2] + i[2]);
+            gstart[cell[t] + 1]++;
+        }
+        for (size_t c = 0; c < nc; c++) gstart[c + 1] += gstart[c];
+        std::vector<int32_t> fill(gstart.begin(), gstart.end() - 1);
+        for (size_t t = 0; t < nt; t++) gtri[fill[cell[t]]++] = (int32_t)t;
     }
 
     // n0 refined to the clicked plane: the least eigenvector of the area-weighted scatter of the triangle centres within
@@ -1923,6 +2064,6 @@ PYBIND11_MODULE(faces_core, m) {
             return py::bytes(out);
         }, py::arg("point"), py::arg("dir"), py::arg("axis") = py::none(), py::arg("on") = std::vector<int64_t>(),
            py::arg("off") = std::vector<int64_t>(), py::arg("add") = py::tuple(), py::arg("s0") = py::none(), py::arg("s1") = py::none(),
-           py::arg("window_m") = 6.0, py::arg("slab_m") = 1.5, py::arg("angle_deg") = 15.0, py::arg("concave_max_m") = 0.5,
+           py::arg("window_m") = 6.0, py::arg("slab_m") = 1.5, py::arg("angle_deg") = 15.0, py::arg("concave_max_m") = 0.0,
            py::arg("element_m") = 2.5, py::arg("presence") = 0.35, py::arg("gap_m") = 2.0);
 }
