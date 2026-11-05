@@ -124,14 +124,14 @@ static constexpr double SIDE_DEG = 25, SNAP2_DEG = 3;   // section triangles; a 
 static constexpr double OFFSET_BIN = 0.01, MODE_SEP = 0.05, OFFSET_BAND = 0.08;   // a direction's lines: offset modes
 static constexpr double ALONG_BIN = 0.05, ALONG_GAP = 0.25, WEAK_M = 0.05, PERSIST = 0.35;
 static constexpr int NS = 16, NSMAX = 256;              // stations: pass 1's slab; either pass's at most (a bitset)
-static constexpr double STEP2 = 0.5;                    // pass 2: a station STATION2 long every STEP2 along the element
+static constexpr double STEP2 = 0.5, STEP2A = 1.0;      // pass 2b, 2a: a station STATION2 long every STEP2(A) along the element
 static constexpr double TUKEY_M = 0.03, MODE_BIN = 0.005;   // a line's offset: its offsets' mode, then Tukey's biweight
 static constexpr double SQUARE_DEG = 4;                 // linked faces this close to square or to parallel are made so
 static constexpr double PLATE_DEG = 12, PLATE_M = 0.10, PLATE_OVER = 0.5, PLATE_MIN = 0.05;   // a thin plate's two skins
 static constexpr double LINE_DEG = 3, LINE_M = 0.02, JOIN_M = 0.6, JOIN_PLATE_M = 1.5;   // collinear: one face over a gap
 static constexpr int WRAP_STEPS = 8;                    // round a plate's end (a flange): links at most
 static constexpr double ALT_M = 0.10;                   // a link this much further than the closest may go on instead
-static constexpr double TILT_REDO = 0.05;               // pass 2 again when its profile's tilt is this far (deg) off pass 1's
+static constexpr double TILT_Q = 0.02;                  // an automatic axis's tilt from L / T / Z: rounded to this (deg)
 static constexpr double GRID_M = 1.0, GRID_MAX = 4e6;   // the triangle centres' grid: its cell (m), its cells at most
 static constexpr double WC_M = 1.0;                     // pass 2's window is centred on a grid this fine, fixed to the mesh
 static constexpr double RANGE_SNAP = 2.0;               // pass 2's range: out to multiples of this from the mesh's centre
@@ -400,77 +400,95 @@ class Faces {
         if (!normalize(n0)) std::copy(sd.nn, sd.nn + 3, n0);
         plane_fit(near, p, n0);
 
-        // 2. the axis: given, or the candidates in their order. For each: pass 1, the section 2 slab_m long around the
-        // click, without the owner's choices, gives the axis refined to the element's own drift (a girder 0.3 deg off the
-        // bridge's L leaves its profile 15 cm off 30 m away) and the clicked face's extent along it. Pass 2, the section
-        // sampled at stations along all of that extent, gives the element: the same wherever on it the click is. An
-        // automatic axis whose element is under GATE_M long, GATE_W wide or GATE_COVER covered gives way to the next.
+        // 2. the axis: given (a refit sends the answer's), or the candidates in their order. Along an axis A: pass 1, the
+        // section 2 slab_m long round the click, without the owner's choices, gives the clicked face (the seed) and the
+        // element as far as the click's surroundings tell, its extent and its drift. Pass 2a samples that extent (STEP2A
+        // apart) and gives the element; pass 2b samples the element's own extent (STEP2 apart), counting the stations
+        // where it is present, its window round it, its seed 2a's: the same wherever on the element the click is. An
+        // automatic axis is tilted to the element's drift (a girder 0.25 deg off the bridge's L: 8 cm at its ends) --
+        // pass 1's, then 2a's whole element's when that differs (a bottom flange alone tells the yaw as 0.2 deg) --,
+        // quantized to TILT_Q from L / T / Z, so that nearby clicks agree; 2a and 2b along it are what a refit along the
+        // answer's axis computes again (pass 1 along it differs by millimetres: 2a's inputs are snapped), so the owner's
+        // keys stay. An automatic axis whose element is under GATE_M long, GATE_W wide or GATE_COVER covered gives way
+        // to the next; a pass 2 that finds none gives way to the pass before it.
         std::vector<std::array<double, 3>> axes;
         if (axis) axes.push_back({b.a[0], b.a[1], b.a[2]});
         else axes = choose_axes(near, p, n0, tu);
-        bool found = false;
-        for (size_t ai = 0; ai < axes.size() && ai < GATE_TRIES && !found; ai++) {
-            Build one;
-            std::copy(axes[ai].begin(), axes[ai].end(), one.a);
-            try {
-                section(one, &near, p, n0, sd, tu, -tu.slab_m, tu.slab_m);
-            } catch (const NotFound&) {
-                continue;
-            }
-            lap("pass1 sect");
-            choose(one, nullptr, nullptr, nullptr, 0, org, tu);
-            lap("pass1 chain");
-            sweep(one, p, tu);
-            lap("pass1 sweep");
-            if (!axis && !good(one)) continue;
-            // pass 2, along the element's whole extent (pass 1's profile's and the clicked face's), every station counting,
-            // its window round pass 1's profile, the axis tilted to the element's drift; again with the tilt pass 2's own
-            // profile gives when that is TILT_REDO off pass 1's (which saw only the click's surroundings: a girder's
-            // bottom flange alone tells its yaw badly, 0.1 deg for 0.25, its faces 2-3 cm off at the ends)
-            Build two;
-            if (axis || !tilt(one, two.a)) std::copy(one.a, one.a + 3, two.a);
+        auto pass2 = [&](Build& t, const Build& from, bool a, bool owner) {   // pass 2a (a) or 2b, along t.a
             double wc[2] = {0, 0}, lo[2] = {INFINITY, INFINITY}, hi[2] = {-INFINITY, -INFINITY};
-            for (const Edge& e : one.edges)
+            for (const Edge& e : from.edges)
                 for (const double* x : {e.a, e.b})
                     for (int k = 0; k < 2; k++) lo[k] = std::min(lo[k], x[k]), hi[k] = std::max(hi[k], x[k]);
-            if (!one.edges.empty()) wc[0] = (lo[0] + hi[0]) / 2, wc[1] = (lo[1] + hi[1]) / 2;
-            const double q0 = std::min({one.as0, one.r0, -tu.slab_m}), q1 = std::max({one.as1, one.r1, tu.slab_m});
-            auto pass2 = [&](Build& t) {
+            if (!from.edges.empty()) wc[0] = (lo[0] + hi[0]) / 2, wc[1] = (lo[1] + hi[1]) / 2;
+            const double q0 = a ? std::min({from.as0, from.r0, -tu.slab_m}) : from.as0, q1 = a ? std::max({from.as1, from.r1, tu.slab_m}) : from.as1;
 #ifdef FACES_DEBUG
-                fprintf(stderr, "pass2 range [%.3f, %.3f] wc (%.3f, %.3f) axis (%.6f %.6f %.6f)\n", q0, q1, wc[0], wc[1], t.a[0], t.a[1], t.a[2]);
+            fprintf(stderr, "pass2%s range [%.3f, %.3f] wc (%.3f, %.3f) axis (%.6f %.6f %.6f)\n", a ? "a" : "b", q0, q1, wc[0], wc[1], t.a[0], t.a[1], t.a[2]);
 #endif
-                section(t, nullptr, p, n0, sd, tu, q0, q1, &one.segs[one.seed], wc);
-                lap("pass2 sect");
-                choose(t, &on, &off, add, nadd, org, tu);
-                lap("pass2 chain");
-                sweep(t, p, tu);
-                lap("pass2 sweep");
-            };
+            section(t, nullptr, p, n0, sd, tu, q0, q1, &from.segs[from.seed], wc, a ? STEP2A : STEP2, a ? nullptr : &from);
+            lap(a ? "pass2a sect" : "pass2b sect");
+            choose(t, owner ? &on : nullptr, owner ? &off : nullptr, owner ? add : nullptr, owner ? nadd : 0, org, tu);
+            sweep(t, p, tu);
+            lap(a ? "pass2a done" : "pass2b done");
+        };
+        auto pass1 = [&](Build& t, const double* A) {   // false: no side face at the click along A
+            t = Build();
+            std::copy(A, A + 3, t.a);
             try {
-                pass2(two);
-                double a3[3];
-                if (!axis && tilt(two, a3) && std::acos(std::min(1.0, dot(a3, two.a))) > TILT_REDO * PI / 180) {
-                    Build t3;
-                    std::copy(a3, a3 + 3, t3.a);
-                    try {
-                        pass2(t3);
-                        two = std::move(t3);
-                    } catch (const NotFound&) {
-                    }
-                }
-                if (!axis && !good(two)) two = Build();
+                section(t, &near, p, n0, sd, tu, -tu.slab_m, tu.slab_m);
             } catch (const NotFound&) {
+                return false;
+            }
+            choose(t, nullptr, nullptr, nullptr, 0, org, tu);
+            sweep(t, p, tu);
+            lap("pass1");
+            return true;
+        };
+        bool found = false;
+        for (size_t ai = 0; ai < axes.size() && ai < GATE_TRIES && !found; ai++) {
+            Build one, two, three;   // pass 1, 2a, 2b
+            if (!pass1(one, axes[ai].data()) || (!axis && !good(one))) continue;
+            double A[3];   // the axis of the passes that answer: pass 1 again along it, 2a, 2b
+            if (axis || !tilt(one, A)) std::copy(one.a, one.a + 3, A);
+            if (!axis) quantize(A);
+            bool ok1 = true, ok2 = false, ok3 = false;
+            for (int round = 0; round < 2; round++) {
+                if (dot(A, one.a) < 1 - 1e-12) ok1 = pass1(one, A);
+                if (!ok1) break;
                 two = Build();
+                std::copy(A, A + 3, two.a);
+                try {
+                    pass2(two, one, true, false);
+                    ok2 = good(two);
+                } catch (const NotFound&) {
+                    ok2 = false;
+                }
+                if (!ok2) break;
+                double t[3];   // 2a's element tells the drift otherwise: pass 1 and 2a again along it
+                if (!axis && round == 0 && tilt(two, t) && (quantize(t), dot(t, A) < 1 - 1e-12)) {
+                    std::copy(t, t + 3, A);
+                    continue;
+                }
+                three = Build();
+                std::copy(A, A + 3, three.a);
+                try {
+                    pass2(three, two, false, false);
+                    ok3 = good(three);
+                } catch (const NotFound&) {
+                    ok3 = false;
+                }
+                break;
             }
-            if (two.segs.empty()) {   // pass 2 found no element: pass 1's, with the owner's choices
-                Build c;
-                std::copy(one.a, one.a + 3, c.a);
-                section(c, &near, p, n0, sd, tu, -tu.slab_m, tu.slab_m);
-                choose(c, &on, &off, add, nadd, org, tu);
-                sweep(c, p, tu);
-                two = std::move(c);
+            if (!ok1) continue;
+            // the answer: 2b, or 2a, or pass 1 (which gave way judged without the owner's choices: they change no key),
+            // then with the owner's choices
+            b = std::move(ok3 ? three : ok2 ? two : one);
+            if (!on.empty() || !off.empty() || nadd) {
+                b.links.clear(), b.mate.clear(), b.pieces.clear(), b.edges.clear(), b.keys.clear(), b.poly.clear();
+                b.poly_area = b.total_len = 0;
+                choose(b, &on, &off, add, nadd, org, tu);
+                sweep(b, p, tu);
             }
-            b = std::move(two), found = true;
+            found = true;
         }
         if (!found) throw NotFound(NOTHING);
         const int K = (int)b.segs.size(), E = (int)b.edges.size();
@@ -487,7 +505,7 @@ class Faces {
         double rs = 0, ra = 0;
         long tris = 0;
         for (int k = 0; k < b.nb; k++) {   // the supporting triangles of the stations mostly within [S0, S1]
-            const double b0 = (k - b.side) * h, w = std::min(b0 + h, S1) - std::max(b0, S0);
+            const double b0 = b.st0(k), w = std::min(b0 + h, S1) - std::max(b0, S0);
             if (w >= h / 2) rs += b.sd[k], ra += b.sa[k], tris += b.cnt[k];
         }
         bool caps[2] = {false, false};   // an end face looking out (-a at s0, +a at s1), and nothing beyond it looking back:
@@ -585,7 +603,10 @@ class Faces {
         std::vector<std::string> keys;
         std::vector<std::array<double, 2>> poly;   // the main piece's profile closed by its chord
         double poly_area = 0, total_len = 0, as0 = 0, as1 = 0, r0 = 0, r1 = 0;   // r0, r1: the seed segment's own extent
-        int side = 0, nb = 0;   // stations k - side: [(k - side) h, (k - side + 1) h)
+        int side = 0, nb = 0;   // the sweep's stations: k from the mesh's centre, at st0(k) from the click
+        double at = 0;          // the click along the axis from the mesh's centre
+        std::vector<char> present;   // per station: the profile is present there
+        double st0(int k) const { return (k - side) * STATION - at; }
         int ns = 0;             // the section's stations, each slen long
         double slen = 0;
         std::vector<double> cov, sa, sd, drift;   // per station: per edge its supported area; area, area x dist^2; per edge 5 sums
@@ -637,7 +658,8 @@ class Faces {
     // on pass 1's seed line. The window: window_m round the click, or round wc (pass 2: pass 1's profile, in its frame --
     // the road clicked by one curb sees the other, 6.6 m away).
     void section(Build& b, const std::vector<Near>* near, const double* p, const double* n0, const Seed& sd, const Tune& tu,
-                 double r0, double r1, const Seg* hint = nullptr, const double* wc = nullptr) const {
+                 double r0, double r1, const Seg* hint = nullptr, const double* wc = nullptr, double step2 = STEP2,
+                 const Build* prev = nullptr) const {
         double* a = b.a;
         if (std::fabs(a[2]) < 0.9) {
             for (int k = 0; k < 3; k++) b.e2[k] = Z[k] - a[2] * a[k];
@@ -654,7 +676,7 @@ class Faces {
         } else {   // STEP2 apart (twice that per 128 m past it), at multiples of it from the mesh's centre, over [r0, r1]
             const double at = dot(a, p);   // the click along the axis from the mesh's centre
             r0 = std::floor((r0 + at) / RANGE_SNAP) * RANGE_SNAP - at, r1 = std::ceil((r1 + at) / RANGE_SNAP) * RANGE_SNAP - at;
-            for (step = STEP2; (r1 - r0) / step > NSMAX - 1; step *= 2) {}
+            for (step = step2; (r1 - r0) / step > NSMAX - 1; step *= 2) {}
             hw = STATION2 / 2, sc0 = std::ceil((r0 + at) / step) * step - at, ns = std::clamp((int)std::floor((r1 - sc0) / step) + 1, 1, NSMAX);
         }
         const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, af[3] = {(float)a[0], (float)a[1], (float)a[2]},
@@ -720,7 +742,12 @@ class Faces {
         // past its ends dilute nothing); the length they sample. The offsets are binned from the mesh's centre, not from
         // the click: guv is the click in the section from there.
         SSet ref;
-        if (hint) {
+        if (prev && !prev->present.empty()) {   // pass 2b: where pass 2a's element is present
+            for (int j = 0; j < ns; j++) {
+                const int k = (int)std::floor((sc0 + j * step + prev->at) / STATION) + prev->side;
+                if (k >= 0 && k < prev->nb && prev->present[k]) ref.add(j, j);
+            }
+        } else if (hint) {
             const double hd[2] = {-hint->n[1], hint->n[0]}, ca = std::cos(tu.angle_deg * PI / 180);
             for (const STri& x : b.st) {
                 const double off = x.q[0] * hint->n[0] + x.q[1] * hint->n[1] - hint->c, t = x.q[0] * hd[0] + x.q[1] * hd[1];
@@ -851,17 +878,15 @@ class Faces {
     // each edge's offsets (for the drift); 8. the end faces inside the main piece. Then the automatic extent.
     void sweep(Build& b, const double* p, const Tune& tu) const {
         const double h = STATION;
-        double smax = 0;   // the stations: the mesh's bbox along the axis, both ways from the click
-        for (int c = 0; c < 8; c++) {
-            double r = 0;
-            for (int k = 0; k < 3; k++) r += (((c >> k & 1) ? ext[k] : -ext[k]) - p[k]) * b.a[k];
-            smax = std::max(smax, std::fabs(r));
-        }
+        double smax = 0;   // the stations: STATION long from the mesh's centre (not the click) over its bbox along the axis
+        for (int k = 0; k < 3; k++) smax += ext[k] * std::fabs(b.a[k]);
         const int E = (int)b.edges.size();
-        b.side = (int)std::ceil(smax / h) + 2, b.nb = 2 * b.side;
+        b.at = dot(b.a, p), b.side = (int)std::ceil(smax / h) + 2, b.nb = 2 * b.side;   // station k: [st0(k), st0(k) + h)
         b.cov.assign((size_t)b.nb * std::max(E, 1), 0.0), b.drift.assign((size_t)b.nb * std::max(E, 1) * 5, 0.0);
         b.sa.assign(b.nb, 0.0), b.sd.assign(b.nb, 0.0), b.cnt.assign(b.nb, 0), b.vmin.assign(b.nb, INFINITY), b.vmax.assign(b.nb, -INFINITY);
         b.as0 = -h / 2, b.as1 = h / 2;   // no present station at all: 25 cm around the click
+        b.capt.clear();
+        b.present.assign(b.nb, 0);
         if (!E) return;
         double bb[4] = {INFINITY, -INFINITY, INFINITY, -INFINITY};
         for (const Edge& e : b.edges)
@@ -878,7 +903,7 @@ class Faces {
         std::vector<EF> ef;
         for (const Edge& e : b.edges)
             ef.push_back({{(float)e.n[0], (float)e.n[1]}, {(float)e.d[0], (float)e.d[1]}, {(float)e.a[0], (float)e.a[1]}, (float)e.len, (float)e.c});
-        const double rb[6] = {-b.side * h, b.side * h, u0, u1, v0, v1};   // the grid's cells along the profile's box
+        const double rb[6] = {-b.side * h - b.at, b.side * h - b.at, u0, u1, v0, v1};   // the grid's cells along the profile's box
         double blo[3], bhi[3];
         box(p, b.a, b.e1, b.e2, rb, blo, bhi);
         visit(blo, bhi, [&](int32_t ti) {
@@ -910,7 +935,7 @@ class Faces {
                 seedy |= b.edges[e].seg == b.seed;
                 if (std::fabs(o) <= bd) best = e, bd = std::fabs(o), off = o;
             }
-            const int k = std::clamp((int)std::floor(s / h) + b.side, 0, b.nb - 1);
+            const int k = std::clamp((int)std::floor((s + b.at) / h) + b.side, 0, b.nb - 1);
             if (seedy) b.covs[k] += A[t];
             if (best < 0) return;
             const double w = A[t];
@@ -937,18 +962,21 @@ class Faces {
                     for (int e = 0; e < E; e++) got += std::min(b.cov[(size_t)k * E + e] / h, b.edges[e].len);
                 return got >= tu.presence * len;
             };
+            if (!seed_only)
+                for (int k = 0; k < b.nb; k++) b.present[k] = present(k);
+            const int kc = std::clamp((int)std::floor(b.at / h) + b.side, 0, b.nb - 1);   // the click's station
             int last = -1;
-            for (int k = b.side, gap = 0; k < b.nb; k++) {
+            for (int k = kc, gap = 0; k < b.nb; k++) {
                 if (present(k)) last = k, gap = 0;
                 else if (++gap * h >= tu.gap_m - 1e-9) break;
             }
-            if (last >= 0) s1 = std::max((double)b.vmax[last], (last - b.side) * h);
+            if (last >= 0) s1 = std::max((double)b.vmax[last], b.st0(last));
             last = -1;
-            for (int k = b.side - 1, gap = 0; k >= 0; k--) {
+            for (int k = kc - 1, gap = 0; k >= 0; k--) {
                 if (present(k)) last = k, gap = 0;
                 else if (++gap * h >= tu.gap_m - 1e-9) break;
             }
-            if (last >= 0) s0 = std::min((double)b.vmin[last], (last - b.side + 1) * h);
+            if (last >= 0) s0 = std::min((double)b.vmin[last], b.st0(last) + h);
         };
         extent(false, b.as0, b.as1);
         extent(true, b.r0, b.r1);
@@ -962,7 +990,7 @@ class Faces {
         double got = 0;
         if (fcov) fcov->assign(E, 0.0);
         for (int k = 0; k < b.nb; k++) {   // the stations within [s0, s1], each by its overlap
-            const double b0 = (k - b.side) * h, w = std::min(b0 + h, s1) - std::max(b0, s0);
+            const double b0 = b.st0(k), w = std::min(b0 + h, s1) - std::max(b0, s0);
             if (!(w > 0)) continue;
             for (int e = 0; e < E; e++) {
                 const double c = std::min(b.cov[(size_t)k * E + e] / h, b.edges[e].len) * w;
@@ -988,7 +1016,7 @@ class Faces {
         for (int e = 0; e < E; e++) {
             double w = 0, ws = 0, wss = 0, wo = 0, wos = 0;
             for (int k = 0; k < b.nb; k++) {
-                const double sc = (k - b.side + 0.5) * STATION;
+                const double sc = b.st0(k) + STATION / 2;
                 if (sc < b.as0 || sc > b.as1) continue;
                 const double* dr = &b.drift[((size_t)k * E + e) * 5];
                 w += dr[0], ws += dr[1], wss += dr[2], wo += dr[3], wos += dr[4];
@@ -1099,6 +1127,20 @@ class Faces {
                 const double sg = dot(g, n0) > 0 ? 1 : -1;
                 for (int k = 0; k < 3; k++) n0[k] = sg * g[k];
             }
+    }
+
+    // an axis within SNAP_DEG of L, T or Z: its tilt from it (along each of the other two) rounded to TILT_Q
+    void quantize(double* a) const {
+        const double* G[3] = {L, T, Z};
+        int g = 0;
+        for (int k = 1; k < 3; k++) if (std::fabs(dot(a, G[k])) > std::fabs(dot(a, G[g]))) g = k;
+        const double al = dot(a, G[g]), sg = al < 0 ? -1 : 1, q = TILT_Q * PI / 180;
+        if (!(sg * al >= std::cos(SNAP_DEG * PI / 180))) return;
+        const double* P = G[(g + 1) % 3];
+        const double* Q = G[(g + 2) % 3];
+        const double x = std::nearbyint(std::atan2(dot(a, P), sg * al) / q) * q, y = std::nearbyint(std::atan2(dot(a, Q), sg * al) / q) * q;
+        for (int k = 0; k < 3; k++) a[k] = sg * G[g][k] + std::tan(x) * P[k] + std::tan(y) * Q[k];
+        normalize(a);
     }
 
     void snap_axis(double* c) const {   // onto L / T / Z within SNAP_DEG; the sign along the nearest of them
