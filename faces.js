@@ -1,13 +1,18 @@
 // Element prisms (viewer.html loads this only with ?faces): the dock tool "Odabir elementa". A click on the bridge -> POST
 // /element (selinf.py, faces_core) fits the element there as a prism: one cross-section (a polyline in the plane across
 // its straight axis) swept between two stations, its faces meeting exactly. Over the bridge it is a closed shell (the
-// profile inflated by 3 cm with mitered corners, so it sits just outside the scan), the candidate faces next to it are
-// ghost outlines (a click adds one) and two handles at its ends drag along the axis. The side panel shows the prism alone
-// in a 3D view of its own, its section (click a segment: in or out) and its faces listed; full screen on request.
-// Shift-click adds the surface under the cursor, Delete drops the selected face, Esc clears. Each change refits: one
-// request in flight, the latest wins. Display only: nothing is saved. ?selinf=<url>: the server (as selinf.js); ?ewin=
-// ?eslab= ?eangle= ?econcave= ?eelem= ?epresence= ?egap=: the fit's window_m, slab_m, angle_deg, concave_max_m, element_m,
-// presence, gap_m.
+// profile inflated by 3 cm with mitered corners) drawn in front of the scan: each pixel's depth is pulled toward the eye
+// along its ray by bias() (0.2 m at 7 m), so the scan's noise does not poke through it while a thing well in front still
+// hides it, and the parts behind other things show faintly (an x-ray pass). Two handles at its ends drag along the axis.
+// The side panel shows the prism alone in a 3D view of its own, its section (click a segment: in or out) and its faces
+// listed (a candidate hovered there shows over the bridge); full screen on request. On the bridge a click always starts
+// a new element there (the one shown stays, with a pulsing dot at the click, until the answer; a failed pick keeps it),
+// shift-click adds the surface under the cursor, alt-click takes the element's face under the cursor out (lit while the
+// mouse is over it; while the tool is on, an alt-click is not selinf.js's); faces are picked in the panel, Delete drops
+// the picked one, Esc clears. Each change refits: one request in flight, the latest wins, a failure goes back to the
+// answer shown. Display only: nothing is saved. ?selinf=<url>: the server (as selinf.js); ?ewin= ?eslab= ?eangle=
+// ?econcave= ?eelem= ?epresence= ?egap=: the fit's window_m, slab_m, angle_deg, concave_max_m, element_m, presence,
+// gap_m; ?ebias=b0,k,max: bias()'s numbers.
 // Node imports this module for its pure functions alone (test_faces.mjs): three.js is loaded only in the page.
 
 const sub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]], dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
@@ -168,6 +173,27 @@ export function rayHit(o, dir, pos, index) {
   }
   return best;
 }
+// the face of the answer A whose shell G (prism()) the ray o + t dir meets first: its key, or null
+export function faceUnder(A, G, o, dir) {
+  const s = A && G && rayHit(o, dir, G.pos, G.index), f = s && A.faces[G.tris[s.i]];
+  return f ? f.key : null;
+}
+// how far (m) what is drawn over the bridge is pulled toward the eye at r m from it: b0 + k r, at most max, never past half
+// way. The scan is noisy (±2 cm on clean concrete, ±10-20 cm under the deck, on the abutments and banks): the shell must
+// sit that far in front of it, while a railing post 0.3 m in front of the fascia, seen from 5 m, still hides it
+export const BIAS = [0.12, 0.012, 0.6];
+export const bias = (r, [b0, k, max] = BIAS) => Math.min(b0 + k * r, max, r / 2);
+// the fragment shader's depth for that (vEye: the pixel's point, view space; feBias: b0, k, max; feW: its depth moved bias()
+// toward the eye along its ray): three's logarithmic depth, as viewer.html's renderer has it, else the projection's. Per
+// pixel, not per corner: interpolated from the corners, a quad 36 m long would be pulled by the corners' share of their
+// distance, not its own pixel's
+const BIAS_GLSL = `float feR = length( vEye ), feW = -vEye.z * ( 1.0 - min( min( feBias.x + feBias.y * feR, feBias.z ), 0.5 * feR ) / feR );
+#ifdef USE_LOGARITHMIC_DEPTH_BUFFER
+	gl_FragDepth = vIsPerspective == 0.0 ? gl_FragCoord.z : log2( 1.0 + feW ) * logDepthBufFC * 0.5;
+#else
+	vec4 feC = projectionMatrix * vec4( 0.0, 0.0, -feW, 1.0 );
+	gl_FragDepth = 0.5 + 0.5 * feC.z / feC.w;
+#endif`;
 // a handle's drag: the station s on the axis p0 + s a (a unit) nearest the pointer's ray o + t dir (unit); null: the ray
 // runs along the axis
 export function axisParam(o, dir, p0, a) {
@@ -191,6 +217,7 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   const TUNE = {}; // the fit's tuning from the URL (only what is given: the server's defaults otherwise)
   for (const [q, k] of [['ewin', 'window_m'], ['eslab', 'slab_m'], ['eangle', 'angle_deg'], ['econcave', 'concave_max_m'],
     ['eelem', 'element_m'], ['epresence', 'presence'], ['egap', 'gap_m']]) if (Q.get(q) && Number.isFinite(+Q.get(q))) TUNE[k] = +Q.get(q);
+  const EB = (Q.get('ebias') ?? '').split(',').map(Number), EBIAS = EB.length === 3 && EB.every((x) => Number.isFinite(x) && x >= 0) ? EB : BIAS;
   const TOUCH = matchMedia('(pointer: coarse)').matches, nf = (o) => new Intl.NumberFormat('hr-HR', o).format;
   const n0 = nf({ maximumFractionDigits: 0 }), n2 = nf({ minimumFractionDigits: 2, maximumFractionDigits: 2 }), pct = nf({ style: 'percent' });
   const ploha = (n) => `${n0(n)} ${n % 10 > 1 && n % 10 < 5 && (n % 100 < 12 || n % 100 > 14) ? 'plohe' : 'ploha'}`;
@@ -198,46 +225,69 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   // element a handle drags to; the element's colour (--ac-fg) over the bridge and in the section
   const D = 0.03, ADD = 0.2, MIN = 0.2, NEAR_M = 0.3, LABELS = 60, INK0 = 0x0c0c0d, AC = 0x5a9bff, ISO = 0.6155;
   const PICK = `${TOUCH ? 'Dodirnite' : 'Kliknite'} element mosta.`;
-  const MORE = TOUCH ? 'Presjek: dodir dodaje ili uklanja plohu.' : 'Presjek ili sivi obris: dodaj ili ukloni plohu · Shift+klik dodaje · Esc briše';
-  // on: the tool; req: the element's request ({point, dir, axis, on, off: forced keys, add: points, s0, s1, tog: keys the
-  // user toggled}); ok: a copy of the request of the answer shown (a failed refit goes back to it); ans: that answer; hov /
-  // sel: the hovered / selected face or candidate ('s12' a segment's, 'j3' a joint, 'cap0'); gen: bumped on clear
+  const MORE = TOUCH ? 'Dodir: novi element · plohe mijenjajte u presjeku'
+    : 'Klik: novi element · Shift+klik: dodaj plohu · Alt+klik: ukloni plohu · Esc: očisti';
+  // on: the tool; req: the latest request ({point, dir, axis, on, off: forced keys, add: points, s0, s1, tog: keys the user
+  // toggled}; no axis yet: a new element on its way); ok: a copy of the request of the answer shown (a failed request goes
+  // back to it); ans: that answer; hov / sel: the hovered / selected face or candidate ('s12' a segment's, 'j3' a joint,
+  // 'cap0'); gen: bumped on clear
   let on = false, unhint = () => {}, req = null, ok = null, ans = null, hov = null, sel = null, gen = 0, busy = false, dirty = false;
   const h = (tag, cls = '', text = '') => Object.assign(document.createElement(tag), { className: cls, textContent: text });
   const btn = (label, onclick, title = label) => Object.assign(h('button', '', label), { type: 'button', title, onclick });
   const seg = (k) => ans?.segments.find((g) => g.key === k), segOf = (id) => (/^s\d+$/.test(id ?? '') ? seg(+id.slice(1)) : null);
-  const want = (g) => (g.auto || req.on.has(g.key)) && !req.off.has(g.key); // in the element as the request stands
+  const pending = () => !!req && !req.axis; // a new element on its way (the one shown stays until it comes)
+  const cur = () => (pending() ? ok : req); // the request of the element shown, with its changes on their way
+  const edit = () => (pending() ? (req = copy(ok)) : req); // to change the element shown (a new one on its way is dropped)
+  const want = (g) => (g.auto || cur().on.has(g.key)) && !cur().off.has(g.key); // in the element as its request stands
   const lm = (o) => new LineMaterial({ linewidth: 1, ...o }); // fat lines: CSS px wide, antialiased with the scene
 
   // ---------- over the bridge, in the bake frame (as selinf.js's root). In the scene, not lod.overlays: its MSAA target
-  // smooths them, and the shell is depth-tested against the bridge. The picked face's outline is drawn on top, faintly
+  // smooths them, and they are depth-tested against the bridge, pulled toward the eye by bias() (biased()). Each has an
+  // x-ray twin on the same geometry, drawn where it is behind the bridge (a railing, a girder in front), faint; the picked
+  // face's outline is drawn on top of everything, faintly. Nothing here writes depth
   const root = new THREE.Group(); root.rotation.x = -Math.PI / 2; lod.scene.add(root);
-  const fillM = (opacity, color = AC) => new THREE.MeshBasicMaterial({ color, transparent: true, opacity, depthWrite: false, side: THREE.DoubleSide });
-  const shell = new THREE.Mesh(undefined, fillM(0.2)), edges = new LineSegments2(undefined, lm({ color: 0xa8cbff, linewidth: 1.75 }));
-  const ghostL = new LineSegments2(undefined, lm({ color: 0xd8d8dc, linewidth: 1.25, dashed: true, dashSize: 0.12, gapSize: 0.08, transparent: true, opacity: 0.85 }));
+  const feBias = { value: new THREE.Vector3(...EBIAS) }; // one uniform for all of them (userData.feBias: a bench may try others)
+  function biased(m, xray = false) { // m's depth per pixel as BIAS_GLSL; x-ray: only where that is behind what is drawn
+    m.onBeforeCompile = (s) => {
+      s.uniforms.feBias = feBias;
+      s.vertexShader = 'varying vec3 vEye;\n' + s.vertexShader.replace('#include <logdepthbuf_vertex>', '#include <logdepthbuf_vertex>\n\tvEye = mvPosition.xyz;');
+      s.fragmentShader = 'varying vec3 vEye;\nuniform vec3 feBias;\n#ifndef USE_LOGARITHMIC_DEPTH_BUFFER\nuniform mat4 projectionMatrix;\n#endif\n' +
+        s.fragmentShader.replace('#include <logdepthbuf_fragment>', BIAS_GLSL);
+    };
+    m.customProgramCacheKey = () => 'fe-bias';
+    m.userData.feBias = feBias;
+    return Object.assign(m, { transparent: true, depthWrite: false, ...(xray && { depthFunc: THREE.GreaterDepth }) });
+  }
+  const fillM = (opacity, color = AC, xray) => biased(new THREE.MeshBasicMaterial({ color, opacity, side: THREE.DoubleSide }), xray);
+  const lineM = (o, xray) => biased(lm(o), xray);
+  const twin = (o, m) => { o.userData.x = new o.constructor(o.geometry, m); o.userData.x.renderOrder = o.renderOrder - 4; return o; }; // drawn before o
+  const shell = new THREE.Mesh(undefined, fillM(0.2)), edges = new LineSegments2(undefined, lineM({ color: 0xa8cbff, linewidth: 1.75 }));
   const hovF = new THREE.Mesh(undefined, fillM(0.22)), selF = new THREE.Mesh(undefined, fillM(0.38, 0x9cc3ff));
-  const ghH = new LineSegments2(undefined, lm({ color: AC, linewidth: 2.25 }));
+  const ghH = new LineSegments2(undefined, lineM({ color: AC, linewidth: 2.25 }));
   const selL = new LineSegments2(undefined, lm({ color: 0xffffff, linewidth: 1.5, transparent: true, opacity: 0.5, depthTest: false, depthWrite: false }));
-  shell.renderOrder = 1; hovF.renderOrder = selF.renderOrder = 2; selL.renderOrder = 9;
-  root.add(shell, edges, ghostL, hovF, selF, ghH, selL);
-  function setMesh(o, pos, index) { // new geometry (the old one disposed); hidden while empty
+  shell.renderOrder = 5; hovF.renderOrder = selF.renderOrder = 6; edges.renderOrder = 7; ghH.renderOrder = 8; selL.renderOrder = 9;
+  twin(shell, fillM(0.07, AC, true)); twin(hovF, fillM(0.1, AC, true)); twin(selF, fillM(0.14, 0x9cc3ff, true));
+  twin(edges, lineM({ color: 0xa8cbff, linewidth: 1.25, opacity: 0.3 }, true)); twin(ghH, lineM({ color: AC, linewidth: 1.75, opacity: 0.45 }, true));
+  for (const o of [shell, edges, hovF, selF, ghH, selL]) root.add(o, ...(o.userData.x ? [o.userData.x] : []));
+  function setMesh(o, pos, index) { // new geometry (the old one disposed), shared with o's x-ray twin; hidden while empty
     o.geometry.dispose(); o.geometry = new THREE.BufferGeometry(); o.visible = pos.length > 0;
     if (o.visible) { o.geometry.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(pos), 3)); if (index) o.geometry.setIndex(index); }
+    if (o.userData.x) Object.assign(o.userData.x, { geometry: o.geometry, visible: o.visible });
   }
   function setLines(o, pos) { // pos: point pairs
     o.geometry.dispose(); o.geometry = new LineSegmentsGeometry(); o.visible = pos.length > 0;
     if (o.visible) { o.geometry.setPositions(pos); if (o.material.dashed) o.computeLineDistances(); }
+    if (o.userData.x) Object.assign(o.userData.x, { geometry: o.geometry, visible: o.visible });
   }
   for (const o of [shell, hovF, selF]) setMesh(o, []);
-  for (const o of [edges, ghostL, ghH, selL]) setLines(o, []);
-  // G: the shown answer's prism() and ghosts() (all: a candidate hovered in the section shows wherever it is); NEAR: the keys
-  // of the ghosts drawn and clickable, the candidates within NEAR_M of the profile (the fit chains within 0.25 m; a window
-  // has dozens of candidates, each drawn the element's whole length)
+  for (const o of [edges, ghH, selL]) setLines(o, []);
+  // G: the shown answer's prism() and ghosts() (the candidates out of it: one shows over the bridge while it is hovered in
+  // the section or the list); NEAR: the candidates within NEAR_M of the profile (the fit chains within 0.25 m), drawn dashed
+  // in the side view
   let G = null, NEAR = new Set();
-  function build3(A) { // the shell, its edges and the ghosts of A (the answer, or the answer at a handle's drag)
+  function build3(A) { // the shell and its edges of A (the answer, or the answer at a handle's drag)
     G = A && { ...prism(A, D), gh: ghosts(A, D) };
     setMesh(shell, G?.pos ?? [], G?.index); setLines(edges, G?.edges ?? []);
-    setLines(ghostL, (G?.gh ?? []).filter((g) => NEAR.has(g.key)).flatMap((g) => quadLines(g.p)));
     hilite();
   }
   function shape3(id) { // id over the bridge: its triangles and outline (a face's on the shell, a ghost's)
@@ -252,34 +302,35 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
     });
     return { tri, lines: [...cnt].filter(([, c]) => c === 1).flatMap(([e]) => e.split(',').flatMap((i) => V(+i))) }; // its outline: edges of one triangle
   }
-  function hilite() { // the hovered face lighter, the selected one lighter still, their outlines on top; a hovered ghost solid
+  function hilite() { // the hovered face lighter, the selected one lighter still, their outlines on top; a hovered candidate's
+    // rectangle filled and outlined in the element's colour
     const s = shape3(sel), v = hov !== sel ? shape3(hov) : null, gv = v && G.gh.some((g) => 's' + g.key === hov);
     setMesh(selF, s?.tri ?? []); setMesh(hovF, v?.tri ?? []);
     setLines(selL, [...(s?.lines ?? []), ...(v && !gv ? v.lines : [])]); setLines(ghH, gv ? v.lines : []);
   }
   const rc = new THREE.Raycaster();
   function ray(e) { rc.setFromCamera(lod.ndcOf(e), lod.camera); return [lod.w2src(rc.ray.origin), lod.w2src(rc.ray.direction)]; } // bake frame
-  function under(o, d) { // the element's face or the ghost the ray meets first: {id, t, ghost: its key}
-    const s = G && rayHit(o, d, G.pos, G.index);
-    let best = s && ans.faces[G.tris[s.i]] ? { id: ans.faces[G.tris[s.i]].key, t: s.t } : null;
-    for (const g of G?.gh ?? []) if (NEAR.has(g.key)) { const q = rayHit(o, d, g.p, [0, 1, 2, 0, 2, 3]); if (q && !(best?.t <= q.t)) best = { id: 's' + g.key, t: q.t, ghost: g.key }; }
-    return best;
-  }
 
-  // the two handles: on the axis at s0 and s1, dragged along it (the shell follows), released -> a refit with that extent.
-  // DOM dots placed each frame while an element is shown (crisp, on top, their own pointer events)
+  // the two handles: on the axis at s0 and s1, dragged along it (the shell follows), released -> a refit with that extent;
+  // pin: a new element on its way, a pulsing dot at the click. DOM dots placed each frame while an element is shown or on
+  // its way (crisp, on top; the handles take their own pointer events)
   const hd = [0, 1].map((k) => { const b = h('div', 'fe-h'); b.title = k ? 'Kraj elementa: povucite' : 'Početak elementa: povucite'; b.hidden = true; document.body.append(b); return b; });
+  const pin = h('div', 'fe-p');
+  pin.hidden = true; document.body.append(pin);
   let ext = null, drag = null, raf = 0; // ext: [s0, s1] drawn
   const cpos = new THREE.Vector3();
-  function place() {
-    raf = ans ? requestAnimationFrame(place) : 0;
-    hd.forEach((b, k) => {
-      const p = ans && lod.src2w(at(ans, 0, 0, ext[k])), c = p && cpos.copy(p).applyMatrix4(lod.camera.matrixWorldInverse);
-      if (p) p.project(lod.camera);
-      b.hidden = !p || c.z > -lod.camera.near || Math.abs(p.x) > 1 || Math.abs(p.y) > 1 || fs;
-      if (!b.hidden) b.style.transform = `translate(${((p.x + 1) / 2) * el.clientWidth}px,${((1 - p.y) / 2) * el.clientHeight}px)`;
-    });
+  function putAt(b, q) { // b over the bake-frame point q (none: hidden) if it is in front of the eye and on the screen
+    const p = q && lod.src2w(q), c = p && cpos.copy(p).applyMatrix4(lod.camera.matrixWorldInverse);
+    if (p) p.project(lod.camera);
+    b.hidden = !p || c.z > -lod.camera.near || Math.abs(p.x) > 1 || Math.abs(p.y) > 1 || fs;
+    if (!b.hidden) b.style.transform = `translate(${((p.x + 1) / 2) * el.clientWidth}px,${((1 - p.y) / 2) * el.clientHeight}px)`;
   }
+  function place() {
+    raf = ans || pending() ? requestAnimationFrame(place) : 0; // the last call hides them
+    hd.forEach((b, k) => putAt(b, ans && at(ans, 0, 0, ext[k])));
+    putAt(pin, pending() && req.point);
+  }
+  const loop = () => { raf ||= requestAnimationFrame(place); };
   hd.forEach((b, k) => {
     b.addEventListener('pointerdown', (e) => {
       if (!ans || drag || e.button !== 0) return;
@@ -296,7 +347,7 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
     const up = (e) => { // the extent as shown, both ends (the other one where it is)
       if (drag?.id !== e.pointerId) return;
       const m = drag.moved; drag = null; b.classList.remove('dr');
-      if (m && req) { [req.s0, req.s1] = ext; send(); }
+      if (m && ok) { const r = edit(); [r.s0, r.s1] = ext; send(); }
     };
     b.addEventListener('pointerup', up); b.addEventListener('pointercancel', up);
   });
@@ -325,7 +376,7 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
 #fc .sc :is(.c,.e).hv{stroke:var(--t-hi)}#fc .sc :is(.c,.e).on{stroke:#9cc3ff;stroke-width:3.5}#fc .sc .sd{fill:none;stroke:var(--t-hi);stroke-width:1.5}
 #fc .sc text{font-size:10px;font-weight:600;fill:var(--t-mid);text-anchor:middle;dominant-baseline:central;pointer-events:none}
 #fc .sc .h{stroke:transparent;stroke-width:14;pointer-events:stroke;cursor:pointer}#fc .sc .sb{stroke:var(--t-low);stroke-width:1.5}#fc .sc .st{fill:var(--t-low);text-anchor:start}
-#fc .ms{flex:none;color:var(--t-low)}#fc .ms:empty{display:none}
+#fc .ms{position:absolute;right:10px;top:7px;font-size:11px;color:var(--t-mid);pointer-events:none}#fc .ms:empty{display:none}
 #fc .ls{flex:1 1 auto;min-height:0;overflow:auto;overscroll-behavior:contain}
 #fc .r{display:flex;align-items:center;gap:8px;height:28px;padding:0 6px;border-radius:var(--r-sm);font-size:12px;cursor:pointer}
 #fc .r.hv{background:var(--ink2)}#fc .r.on{background:var(--ac-dim)}#fc .r.x{color:var(--t-off)}
@@ -342,6 +393,10 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
 .fe-h{position:fixed;left:0;top:0;z-index:8;width:28px;height:28px;margin:-14px 0 0 -14px;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none}
 .fe-h::after{content:"";width:12px;height:12px;border-radius:50%;background:var(--t-hi);box-shadow:0 0 0 2.5px var(--ac),var(--pin-shadow);transition:transform var(--fast)}
 .fe-h.dr{cursor:grabbing}.fe-h.dr::after{transform:scale(1.3)}
+.fe-p{position:fixed;left:0;top:0;z-index:8;width:30px;height:30px;margin:-15px 0 0 -15px;pointer-events:none}
+.fe-p::before,.fe-p::after{content:"";position:absolute;border-radius:50%}.fe-p::after{inset:10px;background:var(--ac);box-shadow:0 0 0 2px var(--t-hi),var(--pin-shadow)}
+.fe-p::before{inset:0;border:2px solid var(--ac-fg);animation:fe-p 1.1s ease-out infinite}@keyframes fe-p{from{transform:scale(.3);opacity:1}to{transform:scale(1);opacity:0}}
+@media (prefers-reduced-motion:reduce){.fe-p::before{animation:none;opacity:.6}}
 @media (hover:hover){#fc button:not(:disabled,.tg):hover{background:var(--ink4)}#fc .pv button:hover{background:var(--ink2);color:var(--t)}.fe-h:hover::after{transform:scale(1.3)}}
 @media (max-width:700px){#fc{top:auto;right:calc(16px + env(safe-area-inset-right));bottom:calc(28px + var(--h-dock) + env(safe-area-inset-bottom));width:auto;
  height:58dvh;max-height:none;padding:10px 12px;gap:6px}#fc .hd .cap{display:none}#fc .c3{flex:5 1 0}#fc .c2{flex:5 1 0}#fc .vw{flex:1 1 0;height:auto}#fc .sc{height:110px}
@@ -352,10 +407,10 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   const panel = h('div'), hdr = h('div', 'hd'), c3 = h('div', 'c3'), c2 = h('div', 'c2'), vw = h('div', 'vw'), lab = h('div', 'lbs'), pv = h('div', 'pv');
   const sv = h('div', 'sc'), svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), msgEl = h('div', 'ms'), rows = h('div', 'ls'), tot = h('div', 'tot num');
   panel.id = 'fc'; panel.hidden = true;
-  const fsB = btn('Cijeli zaslon', () => setFs(!fs)), autoB = btn('Automatska duljina', () => { if (req) { req.s0 = req.s1 = null; send(); } }, 'Duljina prema skenu (poništava ručice)');
+  const fsB = btn('Cijeli zaslon', () => setFs(!fs)), autoB = btn('Automatska duljina', () => { if (ok) { const r = edit(); r.s0 = r.s1 = null; send(); } }, 'Duljina prema skenu (poništava ručice)');
   hdr.append(h('div', 'cap', 'Odabir elementa'), fsB, autoB, btn('Očisti', () => clear(), 'Očisti (Esc)'));
-  sv.append(svg, h('div', 'cap', 'Presjek'));
-  c3.append(vw, pv); c2.append(sv, msgEl, rows, tot); panel.append(hdr, c3, c2); document.body.append(panel);
+  sv.append(svg, h('div', 'cap', 'Presjek'), msgEl); // the message in the section's corner: the list below does not move
+  c3.append(vw, pv); c2.append(sv, rows, tot); panel.append(hdr, c3, c2); document.body.append(panel);
   const msg = (t) => (msgEl.textContent = t);
 
   // ---------- the side view: the prism alone, flat grey lit from above (lynceus's lambert), dark edges, the picked face in
@@ -389,7 +444,7 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   // Sprijeda: square on from the click's side; Bok: along the axis (the section as drawn below it: e1 right, e2 up)
   for (const [label, k] of [['Izo', 'iso'], ['Odozgo', 'top'], ['Sprijeda', 'front'], ['Bok', 'side']]) pv.append(btn(label, () => ans && fit(...look(k))));
   pv.append(btn('Prikaži sve', () => fit(), 'Prikaži sve (dvoklik)'));
-  const front = (A) => A.e1.map((x) => x * (-Math.sign(dot(req.dir, A.e1)) || 1)), up = () => (req.dir[2] > 0.25 ? -1 : 1); // the click's sides
+  const front = (A) => A.e1.map((x) => x * (-Math.sign(dot(cur().dir, A.e1)) || 1)), up = () => (cur().dir[2] > 0.25 ? -1 : 1); // the click's sides
   function look(k) { // [az, el] of a preset, from the answer's frame
     const a = ans.axis, f = front(ans), hz = Math.hypot(a[0], a[1]) > 0.05, az = (x, y) => Math.atan2(y, x);
     if (k === 'side') return [az(a[0], a[1]), Math.asin(Math.max(-1, Math.min(1, a[2])))];
@@ -592,25 +647,26 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
       return r;
     };
     ans.faces.forEach((f, k) => rows.append(row(f.key, k, f, f.seg == null ? null : seg(f.seg))));
-    for (const key of req.tog) { const g = seg(key); if (g && !g.on) rows.append(row('s' + key, null, null, g)); }
+    for (const key of cur().tog) { const g = seg(key); if (g && !g.on) rows.append(row('s' + key, null, null, g)); }
     const len = ans.s1 - ans.s0, area = ans.faces.reduce((a, f) => a + f.area, 0);
-    tot.textContent = `${ploha(ans.faces.length)} · ${n2(area)} m² · duljina ${n2(len)} m${req.s0 != null || req.s1 != null ? ' (ručno)' : ''} · ${ans.ms < 1 ? '< 1' : n0(ans.ms)} ms`;
+    tot.textContent = `${ploha(ans.faces.length)} · ${n2(area)} m² · duljina ${n2(len)} m${cur().s0 != null || cur().s1 != null ? ' (ručno)' : ''} · ${ans.ms < 1 ? '< 1' : n0(ans.ms)} ms`;
   }
 
-  // ---------- an answer shown (null: none): over the bridge, in the 3D view, the section, the list
+  // ---------- an answer shown (null: none): over the bridge, in the 3D view, the section, the list. The panel shows only
+  // with an element (laid out before it is drawn)
   function show(A) {
-    ans = A; ext = A && [A.s0, A.s1];
+    ans = A; ext = A && [A.s0, A.s1]; panel.hidden = !A;
     const idsNow = new Set([...(A?.faces ?? []).map((f) => f.key), ...(A?.segments ?? []).map((g) => 's' + g.key)]);
     if (!idsNow.has(sel)) sel = null;
     if (!idsNow.has(hov)) hov = null;
     NEAR = new Set((A?.segments ?? []).filter((g) => !g.on && gap(A, g) <= NEAR_M).map((g) => g.key));
     build3(A); side(A); section(); list(); mark();
-    autoB.disabled = !(req && (req.s0 != null || req.s1 != null));
-    if (A && !raf) raf = requestAnimationFrame(place);
-    if (!A) hd.forEach((b) => (b.hidden = true));
+    autoB.disabled = !(A && (cur().s0 != null || cur().s1 != null));
+    if (A) loop(); else hd.forEach((b) => (b.hidden = true));
   }
 
-  // ---------- requests: one in flight; changes meanwhile go out once it returns, only the latest (an older answer is dropped)
+  // ---------- requests: one in flight; changes meanwhile go out once it returns, only the latest (an older answer is
+  // dropped, unless the latest asks the same: a double-click). Until an answer comes, the one shown stays
   const copy = (r) => r && { ...r, on: new Set(r.on), off: new Set(r.off), add: [...r.add], tog: new Set(r.tog) };
   const body = (r) => ({ point: r.point, dir: r.dir, ...(r.axis && { axis: r.axis }), ...(r.on.size && { on: [...r.on] }), ...(r.off.size && { off: [...r.off] }),
     ...(r.add.length && { add: r.add }), ...(r.s0 != null && { s0: r.s0 }), ...(r.s1 != null && { s1: r.s1 }), ...TUNE });
@@ -619,48 +675,54 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
     busy = true;
     while (dirty && req) {
       dirty = false;
-      const g = gen, b = body(req);
+      const g = gen, b = JSON.stringify(body(req));
       let res = null, err = null;
       try { // text/plain body (a string): no CORS preflight
-        const r = await fetch(API + '/element', { method: 'POST', body: JSON.stringify(b) }).catch(() => { throw new Error('server ne odgovara'); });
+        const r = await fetch(API + '/element', { method: 'POST', body: b }).catch(() => { throw new Error('server ne odgovara'); });
         res = await r.json().catch(() => null); // not our answer (a proxy's page, an empty 401): the status says it
         if (!r.ok || !res?.faces) err = [r.status, res?.error || (r.ok ? 'neispravan odgovor' : `HTTP ${r.status}`)];
       } catch (e) { err = [0, e.message]; }
-      if (g !== gen || dirty) continue; // superseded: the latest goes out instead
-      msg('');
+      if (g !== gen || !req || (dirty && JSON.stringify(body(req)) !== b)) continue; // cleared, or superseded: the latest goes out
+      dirty = false; msg('');
       if (err) fail(...err); else done(res);
     }
     busy = false;
   }
   function done(A) { // the axis kept from now on (the keys stay stable), a shift-clicked point's face kept by its key
-    const first = !ok;
+    const first = pending(); // a new element: nothing of the old one picked, its own view (Izo, fitted)
     req.axis = A.axis;
     for (const pt of req.add) {
       const [u, v] = uvs(A, pt), g = A.segments.filter((x) => x.on).sort((a, b) => segDist(a, u, v) - segDist(b, u, v))[0];
       if (g && segDist(g, u, v) < ADD) { if (!g.auto) req.on.add(g.key); } else unhint = ui.hint('Ondje nema plohe za dodati.', 5000);
     }
     req.add = []; ok = copy(req);
+    if (first) { hov = sel = null; touched = false; }
     show(A);
-    if (first) { if (!touched) fit(...look('iso')); unhint(); unhint = ui.hint(MORE, 8000); } // a new element: Izo, fitted
+    if (first) { fit(...look('iso')); unhint(); unhint = ui.hint(MORE, 8000); }
   }
-  function fail(status, text) {
-    const why = status === 422 ? 'Tu nije prepoznat element.' : status === 503 ? 'Prepoznavanje elemenata nije dostupno na poslužitelju.' : `Element nije izračunat: ${text}.`;
+  function fail(status, text) { // back to the answer shown (none: nothing), the hint says why
+    const why = status === 422 ? (pending() ? 'Tu nije prepoznat element.' : 'Uz tu promjenu element nije prepoznat: vraćen je prethodni.')
+      : status === 503 ? 'Prepoznavanje elemenata nije dostupno na poslužitelju.' : `Element nije izračunat: ${text}.`;
     unhint(); unhint = ui.hint(why, 8000);
-    if (ok) { req = copy(ok); show(ans); } // a refit: back to the answer shown
-    else { req = null; show(null); panel.hidden = true; } // a new click: nothing there
+    req = copy(ok); show(ans);
   }
-  function start(point, dir) { // a new element at the click
-    gen++; req = { point, dir, axis: null, on: new Set(), off: new Set(), add: [], s0: null, s1: null, tog: new Set() }; ok = null;
-    hov = sel = null; touched = false; show(null); panel.hidden = false;
-    send();
+  function start(point, dir) { // a new element at the click (the one shown stays until it comes)
+    req = { point, dir, axis: null, on: new Set(), off: new Set(), add: [], s0: null, s1: null, tog: new Set() };
+    send(); loop();
   }
-  function toggle(key) { // a candidate in or out of the element
+  function toggle(key) { // a candidate in or out of the element shown
     const g = seg(key);
-    if (!g || !req) return;
-    if (want(g)) { req.on.delete(key); if (g.auto) req.off.add(key); } else { req.off.delete(key); if (!g.auto) req.on.add(key); }
-    req.tog.add(key); send();
+    if (!g || !ok) return;
+    const r = edit();
+    if (want(g)) { r.on.delete(key); if (g.auto) r.off.add(key); } else { r.off.delete(key); if (!g.auto) r.on.add(key); }
+    r.tog.add(key); send();
   }
-  function clear() { gen++; req = ok = null; hov = sel = null; setFs(false); show(null); msg(''); panel.hidden = true; }
+  function drop(id) { // alt-click: the element's face under the cursor (its key) out of it
+    const f = ans?.faces.find((x) => x.key === id), g = f?.seg != null && seg(f.seg);
+    if (g) return void (want(g) && toggle(g.key)); // (already on its way out: nothing)
+    unhint(); unhint = ui.hint(f ? 'Tu plohu nije moguće ukloniti zasebno.' : 'Ondje nema plohe elementa.', 4000);
+  }
+  function clear() { gen++; req = ok = null; hov = sel = null; setFs(false); show(null); msg(''); }
 
   // ---------- full screen: the panel over everything (the Fullscreen API where there is one, else a CSS overlay: iOS)
   let fs = false;
@@ -679,30 +741,30 @@ function viewer(THREE, { LineSegments2 }, { LineSegmentsGeometry }, { LineMateri
   function setOn(v) {
     on = v; tool.classList.toggle('on', v); tool.setAttribute('aria-pressed', v);
     clear(); unhint(); if (v) unhint = ui.hint(PICK);
-    if (!lod.inferArmed) el.style.cursor = '';
   }
   setOn(false);
-  lod.element = { get answer() { return ans; }, get request() { return req && body(req); } }; // for the bench and tests: read only
+  lod.element = { get answer() { return ans; }, get request() { return req && body(req); }, get pending() { return pending(); } }; // for the bench and tests: read only
 
-  // pointers on the bridge (a click, not a drag; alt / selinf's armed tool: selinf's): the element's face -> selected; a
-  // ghost -> in the element; shift -> the surface there added; elsewhere -> a new element. Nearer than the bridge only
+  // pointers on the bridge (a click, not a drag; selinf.js's armed tool: its click): a click starts a new element at the
+  // point (on the element shown too), shift adds the surface there, alt takes the element's face under the cursor out (its
+  // shell, wherever the ray meets it first). In the capture phase: while the tool is on, an alt-click is not selinf.js's
   let down = null;
   addEventListener('pointerdown', (e) => {
-    if (e.target === el) down = { x: e.clientX, y: e.clientY, slop: e.pointerType === 'touch' ? 10 : 4, skip: e.altKey || e.button !== 0 || lod.inferArmed };
+    if (e.target === el) down = { x: e.clientX, y: e.clientY, slop: e.pointerType === 'touch' ? 10 : 4, skip: e.button !== 0 || lod.inferArmed };
   }, true);
-  el.addEventListener('click', (e) => {
-    if (!on || !down || down.skip || Math.hypot(e.clientX - down.x, e.clientY - down.y) > down.slop) return;
-    const [o, d] = ray(e), u = ans && under(o, d), hit = lod.pick(lod.ndcOf(e));
-    if (u && (!hit || u.t <= hit.distance + 0.15)) return u.ghost != null ? toggle(u.ghost) : mark(u.id, true);
-    if (!hit) return mark(null, true);
+  addEventListener('click', (e) => {
+    if (!on || e.target !== el || !down || down.skip || Math.hypot(e.clientX - down.x, e.clientY - down.y) > down.slop) return;
+    const [o, d] = ray(e);
+    if (e.altKey) { e.stopPropagation(); return drop(faceUnder(ans, G, o, d)); }
+    const hit = lod.pick(lod.ndcOf(e));
+    if (!hit) return; // the sky: nothing changes
     const pt = lod.w2src(hit.point);
     if (e.shiftKey && req) { req.add.push(pt); send(); } else start(pt, d);
-  });
-  el.addEventListener('pointermove', (e) => { // a mouse over the element: its face or ghost picked out (not through the bridge: hover only)
+  }, true);
+  el.addEventListener('pointermove', (e) => { // a mouse over the element: its face under the cursor picked out (what alt-click takes out)
     if (!on || !ans || e.buttons || e.pointerType !== 'mouse' || drag) return;
-    const u = under(...ray(e)), id = u?.id ?? null;
+    const id = faceUnder(ans, G, ...ray(e));
     if (id !== hov) mark(id);
-    if (!lod.inferArmed) el.style.cursor = u ? 'pointer' : '';
   });
   el.addEventListener('pointerleave', () => { if (on && hov) mark(null); });
   addEventListener('keydown', (e) => {

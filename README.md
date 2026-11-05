@@ -40,23 +40,33 @@ is 32 px (16 elsewhere): iOS Safari kills a tab that holds ~1 GB, and a close vi
 Element prisms (`faces.js`, loaded only with `?faces`): the dock tool "Odabir elementa". Turned on, a click on the
 bridge sends the point and the view ray to the server (`POST /element`, in the bake frame), which fits the element there
 as a prism: one cross-section swept along a straight axis between two stations, its faces meeting exactly at the
-profile's corners. Over the bridge it is a closed shell, the profile inflated by 3 cm with mitered corners (so it sits just
-outside the scan): translucent, depth-tested, crisp edges. The candidates next to it (within 0.3 m in the section) are
-dashed ghosts, and a click puts one in; shift-click adds the surface under the cursor. Two handles on the axis drag its
-ends (the release refits with that extent; "Automatska duljina" lets the scan decide again). The panel (top left:
+profile's corners. Over the bridge it is a closed shell, the profile inflated by 3 cm with mitered corners: translucent,
+crisp edges, drawn in front of the scan. Each pixel's depth is pulled toward the eye along its own ray by 0.12 m + 1.2 %
+of its distance (at most 0.6 m, never past half way; `?ebias=b0,k,max`), so the scan's noise (±2 cm on clean concrete,
+±10–20 cm under the deck and on the abutments, plus the tiles' LOD error, ~1 % of the distance) does not poke through it
+in blotches, while what stands well in front still hides it (a railing post 0.3 m before the fascia seen from 5 m; the
+braces ~0.2 m before a girder's web seen from 3 m); the parts behind other things show faintly (an x-ray pass). On the
+bridge a click always starts a new element at that point, on the shown one too; shift-click adds the surface under the
+cursor; alt-click takes out the element's face under the cursor, which lights while the mouse is over it (with the tool
+on, an alt-click is the tool's, not the selective inference's). Until the answer comes the element shown stays, with a
+pulsing dot at the click and "Računanje…" in the panel; where no element is recognised it stays too, and the hint says
+why. Two handles on the axis drag its ends (the release refits with that extent; "Automatska duljina" lets the scan
+decide again). The panel (top left:
 damage.js's inspector is on the right; a bottom sheet on a phone; "Cijeli zaslon": full screen, the Fullscreen API or a
 CSS overlay on iOS, `Esc` leaves) shows the prism alone in a 3D view of its own, lynceus's look (flat grey lambert faces,
 dark edges, the section's outline light at both ends, the other candidates dashed, numbered): drag to orbit,
 right/shift-drag to pan, wheel or pinch to zoom at the cursor, double-click (or Prikaži sve) to fit; Izo / Odozgo /
 Sprijeda (square on, from the click's side) / Bok (along the axis) turn to those views. Below it the section: every
 candidate segment (solid in the element, dashed out), the profile through its corners, the click, a scale bar; a click
-on a segment puts it in or takes it out, the main way to refine it. Then the faces (area, width × length, how much of
-it the scan covers, gore / dolje / bočno, a switch: in or out) and the total (faces, area, length, the server's time).
-Hovering or clicking a face anywhere picks it out everywhere (the list, the 3D view, the section, over the bridge with
-its outline on top); `Delete` takes the picked one out. Every change refits, one request at a time (the latest wins),
-with the answer's axis, so the candidates keep their keys. Display only, nothing is saved. `Esc` clears (again: the tool
-off). `node test_faces.mjs` checks the geometry: the mitered inflation, the shell, the ghosts, the section's drawing,
-the handles' projection. To try it on the Mac without the PC: `~/dev/lynceus/apps/worker/.venv/bin/python dev_faces.py`
+on a segment puts it in or takes it out, the main way to refine it; a candidate hovered there (or in the list) shows
+over the bridge, its rectangle outlined. Then the faces (area, width × length, how much of it the scan covers, gore /
+dolje / bočno, a switch: in or out) and the total (faces, area, length, the server's time). Hovering or clicking a face
+in the panel picks it out everywhere (the list, the 3D view, the section, over the bridge with its outline on top);
+`Delete` takes the picked one out. Every change refits, one request at a time (the latest wins; a failure goes back to
+the answer shown), with the answer's axis, so the candidates keep their keys. Display only, nothing is saved. `Esc`
+clears (again: the tool off). On a phone a tap picks and the panel refines. `node test_faces.mjs` checks the geometry:
+the mitered inflation, the shell, the ghosts, the face under a ray, the section's drawing, the handles' projection, the
+bias's numbers. To try it on the Mac without the PC: `~/dev/lynceus/apps/worker/.venv/bin/python dev_faces.py`
 (http://127.0.0.1:8770/viewer.html?faces) serves this folder, a tileset at `/out/` (`--out`, default
 `~/dev/lod-lite-selinf/out-uastc-200k`) and `POST /element`: faces_core on the bake mesh with
 `--mesh build/bake/mesh.obj` (when faces_core imports: `./test.sh test` builds it), else a mock girder at the click.

@@ -1,10 +1,10 @@
 // node test_faces.mjs (or node --test): faces.js's pure geometry on answers built by hand per the wire format of POST
 // /element: the profile's mitered inflation (an L, a square, a slope, a step), the shell (its quads share their vertices,
-// closed with its caps, wound outward), the ghosts from the segments' t-ranges, picking, a handle's axis projection, the
-// section's drawing
+// closed with its caps, wound outward), the ghosts from the segments' t-ranges, picking (the shell's face under a ray), a
+// handle's axis projection, the section's drawing, the depth bias's numbers
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { at, uvs, ends, segDist, edgeNormals, inflate, earcut, edgeFaces, prism, ghosts, gap, rings, faceMesh, rayHit, axisParam, sectionFit, nice } from './faces.js';
+import { at, uvs, ends, segDist, edgeNormals, inflate, earcut, edgeFaces, prism, ghosts, gap, rings, faceMesh, rayHit, faceUnder, axisParam, sectionFit, nice, BIAS, bias } from './faces.js';
 
 const near = (a, b, msg, eps = 1e-9) => assert.ok(Math.abs(a - b) < eps, `${msg}: ${a} vs ${b}`);
 const sub = (a, b) => a.map((x, i) => x - b[i]), dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
@@ -188,6 +188,32 @@ test('rayHit: the nearest triangle from either side; axisParam: a handle\'s ray 
   const dist = (t) => { const p = ORG.map((x, c) => x + t * AX[c]), w = sub(p, o), m = dot(w, d); return Math.hypot(...sub(w, d.map((x) => x * m))); };
   for (const e of [-0.01, 0.01]) assert.ok(dist(s) < dist(s + e), `${s} is the nearest`);
   assert.equal(axisParam(o, AX, ORG, AX), null); // along the axis: no station
+});
+
+test('faceUnder: the face of the shell a ray meets first (alt-click, hover), from outside, through a cap, a miss, a faceless piece', () => {
+  const A = answer(Bsegs, [Bpc], { caps: [0, 1] }), G = prism(A, D), unit = (v) => v.map((x) => x / Math.hypot(...v));
+  const ray = (from, to) => { const o = at(A, ...from), d = unit(sub(at(A, ...to), o)); return [o, d]; };
+  assert.equal(faceUnder(A, G, ...ray([3, 0.5, 0.5], [0.5, 0.5, 0.5])), 's1'); // from the +u side: the web there
+  assert.equal(faceUnder(A, G, ...ray([0.4, -2, 1], [0.6, 0.5, 1.2])), 's0'); // from below: the soffit, not the top behind it
+  assert.equal(faceUnder(A, G, ...ray([0.5, 0.5, 9], [0.5, 0.5, 0])), 'cap1'); // along the axis from past s1: its end
+  assert.equal(faceUnder(A, G, ...ray([3, 2, 0.5], [3, 5, 0.5])), null); // past it
+  assert.equal(faceUnder(null, null, [0, 0, 0], [1, 0, 0]), null); // nothing shown
+  // an L whose soffit the answer drew no face for (a forced piece): its part of the shell is no face
+  const L = answer(Lsegs, [Lpc]);
+  L.faces = L.faces.slice(0, 1);
+  const H = prism(L, D);
+  assert.equal(faceUnder(L, H, ...ray([-2, 0.5, 0.5], [0.5, 0.5, 0.5])), 's0');
+  assert.equal(faceUnder(L, H, ...ray([0.6, -2, 0.5], [0.6, 0.5, 0.5])), null);
+});
+
+test('bias: the shell pulled toward the eye past the scan\'s noise, short of what stands well in front, never past half way', () => {
+  for (const r of [3, 5, 7, 10, 15]) assert.ok(bias(r) >= 0.15, `under the deck (±10-20 cm) from ${r} m: ${bias(r)}`);
+  assert.ok(bias(5) < 0.3, 'a railing post 0.3 m in front of the fascia, seen from 5 m, still hides the shell');
+  near(bias(7), 0.204, 'at 7 m', 1e-12);
+  assert.equal(bias(100), BIAS[2]); // far: capped
+  near(bias(0.2), 0.1, 'close up: half way', 1e-12);
+  for (let r = 0.05; r < 80; r *= 1.3) assert.ok(bias(r) <= r / 2 && bias(r * 1.3) >= bias(r), `bounded and growing at ${r} m`);
+  near(bias(10, [0.2, 0.02, 1]), 0.4, 'other numbers (?ebias=)', 1e-12);
 });
 
 test('sectionFit: the profile and the click inside the drawing, v up, one scale for both; nice scale bars', () => {
