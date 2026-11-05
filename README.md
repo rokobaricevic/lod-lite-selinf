@@ -33,8 +33,17 @@ pivot. The dock at the bottom: Slojevi (damage classes, opacity), Prepoznaj ošt
 Prikaži cijeli most (fit), Zumiranje povlačenjem (`R`, also on a phone: one finger zooms), Tehnički prikaz (the developer HUD: fps, tiles, LOD sliders; hidden by default).
 URL params: `?tileset=`, `?lru=<MB>` (default 3072, 512 on touch devices), `?uncapped` (render as fast as the GPU
 finishes frames; opens the HUD), `?debug` (opens the HUD), `?selinf=<url>` (another inference server),
-`?damage=<dir>` (default `out/damage/`), `?found=<dir>` (default `out/found/`), `?title=` (the structure's name in the title pill). On touch devices the LOD error target
+`?damage=<dir>` (default `out/damage/`), `?found=<dir>` (default `out/found/`), `?title=` (the structure's name in the title pill),
+`?faces` (the element faces tool, below). On touch devices the LOD error target
 is 32 px (16 elsewhere): iOS Safari kills a tab that holds ~1 GB, and a close view of the deck at full detail does.
+
+Element faces (`faces.js`, loaded only with `?faces`): the dock tool "Plohe elementa". Turned on, a click on the bridge
+drops a 3 m box there (one axis up, one along the camera's horizontal view direction); its gizmo moves, rotates and
+resizes it (keys `1` / `2` / `3` or the panel's buttons: pomak / rotacija / veličina). After the drop and after every
+drag the box goes to the server (`POST /faces`, in the bake frame, as `/click`), which splits the mesh surface inside it
+into flat faces. Each face is drawn as a translucent coloured overlay (its coverage mask as the alpha) and listed with
+its area and orientation (gore / dolje / bočno), plus the total and the server's time; hovering a row picks out its face.
+Display only, nothing is saved. `Esc` removes the box (again: the tool off). `node test_faces.mjs` checks the decoder.
 
 ## Damage (the app's, from lynceus)
 
