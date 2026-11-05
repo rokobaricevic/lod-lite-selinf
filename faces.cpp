@@ -5,63 +5,73 @@
 // module for the element there as a PRISM: one cross-section (a polyline in the plane perpendicular to the element's
 // axis) swept along the axis between two stations. Its side faces are rectangles, profile edge x [s0, s1], and
 // neighbouring faces share their edges by construction (a profile vertex is where two face lines meet), so the
-// element is continuous, closed and clean: the scan's noise and holes are never drawn. The answer also lists every
-// candidate face line of the section, so the owner can turn faces on and off and refit. Display only, nothing is
-// saved. Faces(V, F) is built once from the Survey's bake mesh (selinf_core's Survey.mesh(): the bake frame, Z-up,
-// metres): the vertices as float32 relative to the mesh's bbox centre (a double origin, so the precision holds at
-// large coordinates), the triangles as int32, per triangle its unit normal, area and centre, and the global frame:
-// L, the dominant horizontal direction of the vertical faces (the bridge's long axis), T = Z x L, Z up. No Embree,
-// nothing shared with selinf.cpp, no threads, no per-triangle allocation: linear passes over the triangle centres (a
-// gather, and one sweep per axis tried), the rest on the few thousand triangles around the click.
+// element is continuous, closed and clean: the scan's noise and holes are never drawn. A prism has one cross-section,
+// so the profile comes from the whole element, not from around the click: any click on it gives the same element. The
+// answer also lists every candidate face line of the section, so the owner can turn faces on and off and refit.
+// Display only, nothing is saved. Faces(V, F) is built once from the Survey's bake mesh (selinf_core's Survey.mesh():
+// the bake frame, Z-up, metres): the vertices as float32 relative to the mesh's bbox centre (a double origin, so the
+// precision holds at large coordinates), the triangles as int32, per triangle its unit normal, area and centre, and the
+// global frame: L, the dominant horizontal direction of the vertical faces (the bridge's long axis), T = Z x L, Z up.
+// No Embree, nothing shared with selinf.cpp, no threads, no per-triangle allocation: a few linear passes over the
+// triangle centres (a gather; per pass below, a sweep; pass 2's own gather), the rest on the triangles near the click.
 //
 // THE ALGORITHM. element(point, dir, ...) with the click and the unit view ray, in the bake frame:
-//   1. seed: the triangles within 25 cm of the click (50 cm, 1 m if none) that face the viewer; n0 = the area-weighted
-//      mean normal of those within 30 deg of the nearest one's, refined to the plane there (the least eigenvector of
-//      the scatter of the centres within 1, 2, 4 m that face as n0 and lie within 5 cm of it), snapped onto L / T / Z
-//      within 5 deg (a sparse soffit's noisy triangles tilt it by 3: 30 cm off at 6 m). One pass gathers all within 8 m.
-//   2. axis a (unless given), perpendicular to n0. Candidates: L, T, Z where nearly perpendicular to n0, and n0 x n_k for
-//      the dominant normals n_k within 2 m at 30-150 deg to n0, snapped onto L / T / Z within 3 deg. A prism runs along
-//      its faces, so the axis is the candidate across which the clicked plane is narrowest (its triangles within
-//      angle_deg and 10 cm of it, in a slab of slab_m along the candidate, holes under 1 m bridged); within 25 % of the
-//      narrowest, the one with most side-face area within 2 m (normals within 10 deg of perpendicular). (Side-face area
-//      alone puts the road along the cross-beams under it.) Refined as the least eigenvector of sum(A n n^T) over those
-//      side faces when they span two directions, snapped again. Refined once more after 7, to the element's own drift.
+//   1. seed: the triangle under the click (the nearest facing the viewer, by its distance: near a face's edge a small
+//      one of the next face can be centred nearer), the triangles within 25 cm (or its centre's distance) facing the
+//      viewer within 30 deg of it; n0 = their area-weighted mean normal, refined to the plane there (the least
+//      eigenvector of the scatter of the centres within 1, 2, 4 m that face as n0 and lie within 5 cm of it), snapped
+//      onto L / T / Z within 5 deg (a sparse soffit's noisy triangles tilt it by 3: 30 cm off at 6 m). One pass gathers
+//      everything within 8 m.
+//   2. the axes, in their order (unless one is given), perpendicular to n0. Candidates: L, T, Z where nearly perpendicular
+//      to n0, and n0 x n_k for the dominant normals n_k within 2 m at 30-150 deg to n0, snapped onto L / T / Z within
+//      5 deg. A prism runs along its faces, so first the candidate across which the clicked plane is narrowest (its
+//      triangles within angle_deg and 10 cm of it, in a slab of slab_m along the candidate, holes under 1 m bridged);
+//      within 25 % of the narrowest, the one with most side-face area within 2 m (normals within 10 deg of
+//      perpendicular). (Side-face area alone puts the road along the cross-beams under it.) Then the others, narrowest
+//      first. Each refined as the least eigenvector of sum(A n n^T) over its side faces when they span two directions.
+//   For an axis, PASS 1 is 3-8 on the section 2 slab_m long around the click, without the owner's choices. From it: the
+//   axis tilted to remove the drift of the profile edges' offsets along s over its extent (least squares, at most
+//   1 deg; a level axis in yaw only, from the faces that see it: the real girders run 0.3 deg off L, 15 cm over 30 m),
+//   and the clicked face's own extent (its triangles within 25 cm, enough for a drifting face). PASS 2 is 3-8 again on
+//   the section sampled along all of that extent, a metre past each end: up to 24 stations 25 cm long, 25 cm times a
+//   power of two apart on a grid fixed to the mesh (not to the click), so that every click on an element samples it
+//   alike; a line's persistence counts only the stations where pass 1's seed line is seen (the element's own), and the
+//   seed segment is the one on that line. An automatic axis whose element (either pass) is under 1 m long, 5 cm wide or
+//   25 % covered gives way to the next candidate, three at most; none passes: LookupError.
 //   3. section frame: e2 = Z made perpendicular to a ("up"), e1 = e2 x a; for a near-vertical a, e1 = L made
 //      perpendicular, e2 = a x e1. P(u, v, s) = origin + u e1 + v e2 + s a, the origin the click to the millimetre.
-//   4. candidate segments: the triangles within slab_m of the click along a and window_m of the axis line, normals within
-//      25 deg of perpendicular to a, projected. Directions: an area-weighted 1-deg histogram of the 2D normals, greedy
-//      peaks, each the mean of the normals within angle_deg, snapped onto e1 / e2 within 4 deg; each triangle to its
-//      nearest. Per direction, lines: the modes of the offsets (1 cm bins, smoothed; hills 5 cm apart with a valley under
-//      half between), each triangle to the nearest within 8 cm (clutter fills any "empty gap" between a girder's bottom and
-//      the soffit above). Per line, segments: where it is seen at >= 35 % of the slab's 16 stations, per 5 cm along it,
-//      split where it is not for 25 cm: brackets, posts, stiffeners, a cross-beam's flange meeting a girder's are not
-//      the prism's (the seed's bins always count). Each refits its normal (snapped) and offset, its ends clipped to its
-//      triangles; under 5 cm of mean width (area / 2 slab_m) it is dropped, the seed's never. Keys: the order by normal
-//      angle, offset, start; the same for the same point, axis and tuning.
+//   4. candidate segments: the stations' triangles within window_m of the axis line, normals within 25 deg of
+//      perpendicular to a, projected. Directions: an area-weighted 1-deg histogram of the 2D normals, greedy peaks, each
+//      the mean of the normals within angle_deg, snapped onto e1 / e2 within 2 deg; each triangle to its nearest. Per
+//      direction, lines: the modes of the offsets (1 cm bins, smoothed; hills 5 cm apart with a valley under half
+//      between), each triangle to the nearest within 8 cm (clutter fills any "empty gap" between a girder's bottom and
+//      the soffit above). Per line, segments: where it is seen at >= 35 % of the stations, per 5 cm along it, split where
+//      it is not for 25 cm: brackets, posts, stiffeners, a cross-beam's flange meeting a girder's are not the prism's
+//      (pass 1: the seed's bins always count). Each refits its normal (snapped) and offset, its ends clipped to its
+//      triangles; under 5 cm of mean width (area / the stations' length) it is dropped, the seed's never. Keys: the
+//      order by normal angle, offset, start; the same for the same point, axis and tuning.
 //   5. the chain. A profile is walked with the material on its left: segment i's end meets segment j's start where the
 //      lines cross up to 25 cm beyond both ends but only a little inside either (4-10 cm, a quarter of its length: not
 //      a T), or, within 20 deg of parallel, where the ends are within 25 cm: a joint, a short edge between them (round
 //      a plate's tip, when nothing is within 2-15 cm beyond it; a step). A corner is convex when j turns into i's
-//      material. From the seed segment (the one holding most of the seed's area), a step at each end in turn through the
-//      closest link (a segment under 20 cm at a 10 cm handicap) to a segment ending within element_m of the click:
-//      through convex corners; through a concave one only into a segment shorter than concave_max_m, which ends that
-//      side; never into a ragged segment (rms over 2 cm or 3 % of its length), never so that the profile comes within
-//      2 cm of itself. A path, or a cycle when it closes (a pier seen all round). Then the owner's: on (keys), add (the
-//      segment nearest each point within 15 cm), off (keys, last). The segments that are on link up into pieces: the
-//      chain's links, then the closest that take in a segment the owner turned on.
+//      material. From the seed segment, a step at each end in turn through the closest link (a segment under 20 cm at a
+//      10 cm handicap) to a segment ending within element_m of the seed segment (not of the click: one near a wide
+//      face's edge would reach further): through convex corners; through a concave one only into a segment shorter
+//      than concave_max_m, which ends that side; never into a ragged segment (rms over 2 cm or 3 % of its length), never
+//      so that the profile comes within 2 cm of itself. A path, or a cycle when it closes (a pier seen all round). Then
+//      the owner's: on (keys), add (the segment nearest each point within 15 cm), off (keys, last). The segments that are
+//      on link up into pieces: the chain's links, then the closest that take in a segment the owner turned on.
 //   6. the profile: a vertex is where neighbouring lines meet (a joint's two ends sit on one perpendicular to both);
 //      an open end is the segment's own end.
 //   7. extent: every triangle within 8 cm of a profile edge in the section, its normal within 30 deg of the edge's,
 //      counts toward its 25 cm station; a station is present when its covered length (area / 25 cm per edge, at most
 //      the edge) is >= presence of the profile's length. From the click both ways until gap_m of absent stations (a
 //      girder's web hides 1-2 m behind hangers); the extent ends at the outermost vertex of the last present station's
-//      triangles. s0 / s1 replace it when given. An axis not given is then tilted to remove the drift of the edges'
-//      offsets along s over the extent (least squares; the real girders run 0.3 deg off L: 15 cm over 30 m), and 3-7
-//      are done again with it, at most twice.
+//      triangles. s0 / s1 replace it when given.
 //   8. caps: an end gets the main piece's profile closed by its chord when surface looks out of it there (normals within
 //      25 deg of -a at s0, +a at s1, within 15 cm of the end, inside that polygon) for >= 30 % of its area, and less
 //      than half that looks back (a cross-beam's web where the element meets it).
-//   Speed (Mac M5 Pro): 6-16 ms a click on the real 1 M-triangle mesh; ~3 ms on a 1 M-triangle synthetic.
+//   Speed (Mac M5 Pro): ~10 ms a click on the real 1 M-triangle mesh (90 % under 12 ms); ~6 ms on a 1 M synthetic.
 //
 // THE ANSWER. JSON, UTF-8, compact. Bake frame, metres; positions and lengths rounded to the millimetre, unit vectors
 // unrounded.
@@ -77,8 +87,9 @@
 //      closed profile at s0 / s1; points exact, on the fitted planes; normal outward (the side the survey saw);
 //      width x length (caps: the profile's u x v extent); coverage: the share of its area the scan supports;
 //    "rms": the supporting triangles' distance to their faces, "tris": their count, "ms": the time taken}
-// Bad arguments raise ValueError (selinf.py answers 400); no mesh facing the viewer within 1 m of the click, or no
-// side face at it, raise LookupError (422).
+// Bad arguments raise ValueError (selinf.py answers 400). No element there -- nothing facing the viewer within 1 m of the
+// click, no side face at it, nothing long, wide and covered enough on any axis -- raises LookupError("Ovdje nije
+// prepoznat element"), which selinf.py answers 422 and the viewer shows.
 
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
@@ -92,6 +103,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -100,23 +112,28 @@ namespace py = pybind11;
 
 static constexpr double PI = 3.14159265358979323846;
 static constexpr double SEED_R[3] = {0.25, 0.5, 1.0};   // the seed's radius, grown until a triangle faces the viewer
-static constexpr double SEED_DEG = 30;                  // the seed: triangles within this of the nearest one's normal
+static constexpr double SEED_DEG = 30, SEED_NEAR = 1.5; // the seed: within this of the clicked triangle's normal; its candidates
+static const char* const NOTHING = "Ovdje nije prepoznat element";   // the LookupError (422): the viewer shows it
 static constexpr double FIT_DEG = 20, FIT_M = 0.05, N0_SNAP_DEG = 5;   // the clicked plane's fit; its snap onto L / T / Z
 static constexpr double GATHER_M = 8, CAND_R = 2;       // the gathered sphere; the axis candidates' and scores' sphere
 static constexpr double GLOBAL_DEG = 15;                // L / T / Z are candidates within this of perpendicular to n0
-static constexpr double SUPPORT_DEG = 10, SNAP_DEG = 3; // a side face of an axis; an axis this close to L / T / Z
+static constexpr double SUPPORT_DEG = 10, SNAP_DEG = 5; // a side face of an axis; an axis this close to L / T / Z
 static constexpr double PLANE_M = 0.10, BRIDGE_M = 1.0, TIE = 1.25;   // the seed plane's width: offset, holes, ties
-static constexpr double SIDE_DEG = 25, SNAP2_DEG = 4;   // section triangles; a direction this close to e1 / e2
+static constexpr double SIDE_DEG = 25, SNAP2_DEG = 2;   // section triangles; a direction this close to e1 / e2
 static constexpr double OFFSET_BIN = 0.01, MODE_SEP = 0.05, OFFSET_BAND = 0.08;   // a direction's lines: offset modes
 static constexpr double ALONG_BIN = 0.05, ALONG_GAP = 0.25, WEAK_M = 0.05, PERSIST = 0.35;
-static constexpr int NS = 16;                           // the slab's stations, for a segment's persistence
+static constexpr int NS = 16, NS2 = 24;                 // stations: pass 1's slab, pass 2's extent, at most
+static constexpr double HINT_DEG = 10, HINT_M = 0.10;   // pass 2's seed segment: on pass 1's seed line within these
 static constexpr double LINK_M = 0.25, OVER_MIN = 0.04, OVER_M = 0.10, OVER_FRAC = 0.25, PARALLEL_DEG = 20, AHEAD_M = 0.05;
 static constexpr double TIP_IN_M = 0.02, TIP_OUT_M = 0.15, TIP_SIDE_M = 0.03;   // the space a plate's tip must have
 static constexpr double RMS_M = 0.02, RMS_FRAC = 0.03;  // the chain grows only into segments this straight
 static constexpr double SHORT_M = 0.2, SHORT_PEN = 0.1; // a shorter one competes for a link as this much further away
 static constexpr double SELF_M = 0.02, LOOSE_M = 0.15;  // a profile never comes this close to itself; but its loose ends
-static constexpr double DRIFT_MIN = 1e-4, DRIFT_MAX = 0.035, DRIFT_SPAN = 1.0;   // an auto axis: its tilt (rad), a drift's spread (m)
-static constexpr double STATION = 0.25, NEAR_M = 0.08, NEAR_DEG = 30;
+static constexpr double DRIFT_MIN = 5e-4, DRIFT_MAX = 0.0175, DRIFT_SPAN = 1.0;   // an auto axis: its tilt (rad), a drift's spread (m)
+static constexpr double STATION = 0.25, NEAR_M = 0.08, NEAR_DEG = 30, STATION2 = 0.25;   // pass 2: a station's length
+static constexpr double SEED_BAND = 0.25, RANGE_M = 1;  // the seed face's extent: its triangles this far off it; pass 2 past it
+static constexpr double GATE_M = 1.0, GATE_W = 0.05, GATE_COVER = 0.25;   // an automatic axis's element: long, wide, covered
+static constexpr size_t GATE_TRIES = 3;                 // axes tried
 static constexpr double CAP_DEG = 25, CAP_M = 0.15, CAP_FILL = 0.3, CAP_BACK = 0.5, ADD_M = 0.15;
 static constexpr int NB = 8, BINS = 6 * NB * NB, MAX_PEAKS = 8, MAX_DIRS = 64;
 
@@ -173,6 +190,25 @@ static void least_eigvec(double m[3][3], double w[3], double out[3]) {   // symm
     int o[3] = {0, 1, 2};
     std::sort(o, o + 3, [&](int x, int y) { return m[x][x] < m[y][y]; });
     for (int k = 0; k < 3; k++) w[k] = m[o[k]][o[k]], out[k] = v[k][o[0]];
+}
+static double tri_dist2(const double* p, const float* a, const float* b, const float* c) {   // point p to triangle abc, squared
+    double ab[3], ac[3], ap[3], bp[3], cp[3], q[3];   // the closest point by its Voronoi region (Ericson, Real-Time Collision Detection 5.1.5)
+    for (int k = 0; k < 3; k++) ab[k] = b[k] - a[k], ac[k] = c[k] - a[k], ap[k] = p[k] - a[k], bp[k] = p[k] - b[k], cp[k] = p[k] - c[k];
+    const double d1 = dot(ab, ap), d2 = dot(ac, ap), d3 = dot(ab, bp), d4 = dot(ac, bp), d5 = dot(ab, cp), d6 = dot(ac, cp);
+    const double va = d3 * d6 - d5 * d4, vb = d5 * d2 - d1 * d6, vc = d1 * d4 - d3 * d2;
+    double v = 0, w = 0;
+    if (d1 <= 0 && d2 <= 0) v = w = 0;
+    else if (d3 >= 0 && d4 <= d3) v = 1, w = 0;
+    else if (d6 >= 0 && d5 <= d6) v = 0, w = 1;
+    else if (vc <= 0 && d1 >= 0 && d3 <= 0) v = d1 / (d1 - d3), w = 0;
+    else if (vb <= 0 && d2 >= 0 && d6 <= 0) v = 0, w = d2 / (d2 - d6);
+    else if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) w = (d4 - d3) / ((d4 - d3) + (d5 - d6)), v = 1 - w;
+    else {
+        const double den = va + vb + vc;
+        v = den != 0 ? vb / den : 0, w = den != 0 ? vc / den : 0;
+    }
+    for (int k = 0; k < 3; k++) q[k] = a[k] + v * ab[k] + w * ac[k] - p[k];
+    return dot(q, q);
 }
 static void num(std::string& s, double v, double scale) {   // v rounded to 1 / scale (0: not rounded), shortest round trip
     char b[32];
@@ -270,15 +306,19 @@ class Faces {
                 if (d2 <= r2) near.push_back({(int32_t)t, d2});
             }
         }
-        int32_t nearest = -1;
-        for (double r : SEED_R) {
-            float best = INFINITY;
-            sd.r2 = (float)(r * r);
-            for (const Near& q : near)
-                if (q.d2 <= sd.r2 && q.d2 < best && A[q.t] > 0 && dot(&N[3 * q.t], sd.vd) < 0) best = q.d2, nearest = q.t;
-            if (nearest >= 0) break;
+        int32_t nearest = -1;   // the triangle under the click: the nearest facing the viewer (not by its centre: near a
+        double best = INFINITY; // face's edge, a small one of the next face can be centred nearer than the big one clicked)
+        for (const Near& q : near) {
+            if (q.d2 > SEED_NEAR * SEED_NEAR || !(A[q.t] > 0) || dot(&N[3 * q.t], sd.vd) >= 0) continue;
+            const double d2 = tri_dist2(p, &V[3 * (size_t)F[3 * (size_t)q.t]], &V[3 * (size_t)F[3 * (size_t)q.t + 1]], &V[3 * (size_t)F[3 * (size_t)q.t + 2]]);
+            if (d2 < best) best = d2, nearest = q.t;
         }
-        if (nearest < 0) throw NotFound("no mesh faces the viewer within 1 m of the click");
+        if (nearest < 0 || best > SEED_R[2] * SEED_R[2]) throw NotFound(NOTHING);
+        {   // the seed: within SEED_R[0] of the click, or as far as the clicked triangle's centre
+            const float* c = &C[3 * (size_t)nearest];
+            const double dc = std::hypot(c[0] - p[0], c[1] - p[1], c[2] - p[2]) + 0.02;
+            sd.r2 = (float)std::pow(std::max(SEED_R[0], dc), 2);
+        }
         sd.nn = &N[3 * nearest], sd.cosine = std::cos(SEED_DEG * PI / 180);
         double n0[3] = {0, 0, 0};
         for (const Near& q : near)
@@ -286,24 +326,48 @@ class Faces {
         if (!normalize(n0)) std::copy(sd.nn, sd.nn + 3, n0);
         plane_fit(near, p, n0);
 
-        // 2. the axis; 3-8 for it. Not given: then refined to the element's own drift along its length (a girder 0.3 deg off
-        // the bridge's L leaves its profile 15 cm off 30 m away) and built again, at most twice.
-        if (!axis) choose_axis(near, p, n0, tu, b.a);
-        section(b, near, p, n0, sd, tu);
-        choose(b, on, off, add, nadd, org, tu);
-        sweep(b, p, tu);
-        for (int round = 0; !axis && round < 2; round++) {
-            Build c;
-            if (!tilt(b, c.a)) break;
+        // 2. the axis: given, or the candidates in their order. For each: pass 1, the section 2 slab_m long around the
+        // click, without the owner's choices, gives the axis refined to the element's own drift (a girder 0.3 deg off the
+        // bridge's L leaves its profile 15 cm off 30 m away) and the clicked face's extent along it. Pass 2, the section
+        // sampled at stations along all of that extent, gives the element: the same wherever on it the click is. An
+        // automatic axis whose element is under GATE_M long, GATE_W wide or GATE_COVER covered gives way to the next.
+        std::vector<std::array<double, 3>> axes;
+        if (axis) axes.push_back({b.a[0], b.a[1], b.a[2]});
+        else axes = choose_axes(near, p, n0, tu);
+        bool found = false;
+        for (size_t ai = 0; ai < axes.size() && ai < GATE_TRIES && !found; ai++) {
+            Build one;
+            std::copy(axes[ai].begin(), axes[ai].end(), one.a);
             try {
-                section(c, near, p, n0, sd, tu);
+                section(one, &near, p, n0, sd, tu, -tu.slab_m, tu.slab_m);
             } catch (const NotFound&) {
-                break;
+                continue;
             }
-            choose(c, on, off, add, nadd, org, tu);
-            sweep(c, p, tu);
-            b = std::move(c);
+            choose(one, nullptr, nullptr, nullptr, 0, org, tu);
+            sweep(one, p, tu);
+            if (!axis && !good(one)) continue;
+            Build two;   // pass 2, along the clicked face's whole extent (and RANGE_M past it: only its stations count),
+            if (axis || !tilt(one, two.a)) std::copy(one.a, one.a + 3, two.a);   // with the axis tilted to the element's drift
+            try {
+                section(two, nullptr, p, n0, sd, tu, std::min(one.r0, -tu.slab_m) - RANGE_M, std::max(one.r1, tu.slab_m) + RANGE_M,
+                        &one.segs[one.seed]);
+                choose(two, &on, &off, add, nadd, org, tu);
+                sweep(two, p, tu);
+                if (!axis && !good(two)) two = Build();
+            } catch (const NotFound&) {
+                two = Build();
+            }
+            if (two.segs.empty()) {   // pass 2 found no element: pass 1's, with the owner's choices
+                Build c;
+                std::copy(one.a, one.a + 3, c.a);
+                section(c, &near, p, n0, sd, tu, -tu.slab_m, tu.slab_m);
+                choose(c, &on, &off, add, nadd, org, tu);
+                sweep(c, p, tu);
+                two = std::move(c);
+            }
+            b = std::move(two), found = true;
         }
+        if (!found) throw NotFound(NOTHING);
         const int K = (int)b.segs.size(), E = (int)b.edges.size();
         for (const auto* ks : {&on, &off})
             for (int64_t k : *ks)
@@ -313,13 +377,12 @@ class Faces {
         const double S0 = s0f ? *s0f : b.as0, S1 = s1f ? *s1f : b.as1, h = STATION;
         if (!(S0 < S1))
             throw std::invalid_argument("s0 must be < s1 (the automatic extent is [" + std::to_string(b.as0) + ", " + std::to_string(b.as1) + "])");
-        std::vector<double> fcov(E, 0.0);
+        std::vector<double> fcov;
+        coverage(b, S0, S1, &fcov);
         double rs = 0, ra = 0;
         long tris = 0;
-        for (int k = 0; k < b.nb; k++) {   // the stations within [S0, S1], each by its overlap
-            const double b0 = (k - b.side) * h, b1 = b0 + h, w = std::min(b1, S1) - std::max(b0, S0);
-            if (!(w > 0)) continue;
-            for (int e = 0; e < E; e++) fcov[e] += std::min(b.cov[(size_t)k * E + e] / h, b.edges[e].len) * w;
+        for (int k = 0; k < b.nb; k++) {   // the supporting triangles of the stations mostly within [S0, S1]
+            const double b0 = (k - b.side) * h, w = std::min(b0 + h, S1) - std::max(b0, S0);
             if (w >= h / 2) rs += b.sd[k], ra += b.sa[k], tris += b.cnt[k];
         }
         bool caps[2] = {false, false};   // an end face looking out (-a at s0, +a at s1), and nothing beyond it looking back:
@@ -415,9 +478,10 @@ class Faces {
         std::vector<Edge> edges;
         std::vector<std::string> keys;
         std::vector<std::array<double, 2>> poly;   // the main piece's profile closed by its chord
-        double poly_area = 0, total_len = 0, as0 = 0, as1 = 0;
+        double poly_area = 0, total_len = 0, as0 = 0, as1 = 0, r0 = 0, r1 = 0;   // r0, r1: the seed segment's own extent
         int side = 0, nb = 0;   // stations k - side: [(k - side) h, (k - side + 1) h)
         std::vector<double> cov, sa, sd, drift;   // per station: per edge its supported area; area, area x dist^2; per edge 5 sums
+        std::vector<double> covs;                 // per station: the seed's edges' area within SEED_BAND
         std::vector<int32_t> cnt;
         std::vector<float> vmin, vmax;
         std::vector<CapTri> capt;
@@ -427,8 +491,12 @@ class Faces {
         return q.d2 <= sd.r2 && A[q.t] > 0 && dot(&N[3 * q.t], sd.vd) < 0 && dot(&N[3 * q.t], sd.nn) >= sd.cosine;
     }
 
-    // 3. the section frame of b.a; 4. its candidate segments, the seed's, the keys
-    void section(Build& b, const std::vector<Near>& near, const double* p, const double* n0, const Seed& sd, const Tune& tu) const {
+    // 3. the section frame of b.a; 4. its candidate segments, the seed's, the keys. near given: pass 1, the gathered
+    // triangles within [r0, r1] of the click along the axis, in NS stations. Null: pass 2, every triangle in up to NS
+    // stations STATION2 long spread along [r0, r1], on a grid fixed to the mesh (not to the click): any click on an
+    // element samples it alike; the seed segment is then the one under the click, facing as n0.
+    void section(Build& b, const std::vector<Near>* near, const double* p, const double* n0, const Seed& sd, const Tune& tu,
+                 double r0, double r1, const Seg* hint = nullptr) const {
         double* a = b.a;
         if (std::fabs(a[2]) < 0.9) {
             for (int k = 0; k < 3; k++) b.e2[k] = Z[k] - a[2] * a[k];
@@ -438,34 +506,86 @@ class Faces {
             for (int k = 0; k < 3; k++) b.e1[k] = L[k] - la * a[k];
             normalize(b.e1), cross(a, b.e1, b.e2);
         }
+        double sc0, step, hw;   // station j: s in [sc0 + j step - hw, sc0 + j step + hw]
+        int ns = NS;
+        if (near) {
+            step = (r1 - r0) / NS, hw = step / 2, sc0 = r0 + hw;
+        } else {   // STATION2 times a power of two apart, at multiples of it from the mesh's centre: one grid for every click
+            const double at = dot(a, p);   // the click along the axis from the mesh's centre
+            for (step = STATION2; (r1 - r0) / step > NS2; step *= 2) {}
+            hw = STATION2 / 2, sc0 = std::ceil((r0 + at) / step) * step - at, ns = std::clamp((int)std::floor((r1 - sc0) / step) + 1, 1, NS2);
+        }
         const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, af[3] = {(float)a[0], (float)a[1], (float)a[2]},
                     e1f[3] = {(float)b.e1[0], (float)b.e1[1], (float)b.e1[2]}, e2f[3] = {(float)b.e2[0], (float)b.e2[1], (float)b.e2[2]};
-        const float side = (float)std::sin(SIDE_DEG * PI / 180), slab = (float)tu.slab_m, win2 = (float)(tu.window_m * tu.window_m);
-        const float sw = (float)(NS / (2 * tu.slab_m));
-        for (const Near& q : near) {
-            const float* c = &C[3 * q.t];
+        const float side = (float)std::sin(SIDE_DEG * PI / 180), win2 = (float)(tu.window_m * tu.window_m);
+        auto take = [&](int32_t t, bool seed) {   // triangle t, when its centre is in a station
+            const float* c = &C[3 * (size_t)t];
             const float d[3] = {c[0] - pf[0], c[1] - pf[1], c[2] - pf[2]};
-            const float* n = &N[3 * q.t];
-            if (std::fabs(dot(d, af)) > slab || !(A[q.t] > 0) || !(std::fabs(dot(n, af)) < side)) continue;
+            const double s = dot(d, af);
+            const int j = (int)std::lround((s - sc0) / step);
+            if (j < 0 || j >= ns || std::fabs(s - (sc0 + j * step)) > hw) return;
+            const float* n = &N[3 * (size_t)t];
+            if (!(A[t] > 0) || !(std::fabs(dot(n, af)) < side)) return;
             const float u = (float)dot(d, e1f), v = (float)dot(d, e2f);
-            if (u * u + v * v > win2) continue;
+            if (u * u + v * v > win2) return;
             const float m[2] = {(float)dot(n, e1f), (float)dot(n, e2f)}, l = std::sqrt(m[0] * m[0] + m[1] * m[1]);
-            STri x{{u, v}, {m[0] / l, m[1] / l}, {}, A[q.t], 0, q.t, is_seed(q, sd)};
-            float s0 = INFINITY, s1 = -INFINITY;
-            for (int j = 0; j < 3; j++) {
-                const float* y = &V[3 * (size_t)F[3 * (size_t)q.t + j]];
-                const float w[3] = {y[0] - pf[0], y[1] - pf[1], y[2] - pf[2]}, s = (float)dot(w, af);
-                x.x[j][0] = (float)dot(w, e1f), x.x[j][1] = (float)dot(w, e2f), s0 = std::min(s0, s), s1 = std::max(s1, s);
+            STri x{{u, v}, {m[0] / l, m[1] / l}, {}, A[t], 0, t, seed};
+            double s0 = INFINITY, s1 = -INFINITY;
+            for (int k = 0; k < 3; k++) {
+                const float* y = &V[3 * (size_t)F[3 * (size_t)t + k]];
+                const float w[3] = {y[0] - pf[0], y[1] - pf[1], y[2] - pf[2]};
+                const double sv = dot(w, af);
+                x.x[k][0] = (float)dot(w, e1f), x.x[k][1] = (float)dot(w, e2f), s0 = std::min(s0, sv), s1 = std::max(s1, sv);
             }
-            const int b0 = std::clamp((int)std::floor((s0 + slab) * sw), 0, NS - 1), b1 = std::clamp((int)std::floor((s1 + slab) * sw), 0, NS - 1);
-            for (int k = b0; k <= b1; k++) x.st |= 1u << k;
+            const int k0 = std::max(0, (int)std::ceil((s0 - hw - sc0) / step)), k1 = std::min(ns - 1, (int)std::floor((s1 + hw - sc0) / step));
+            for (int k = k0; k <= k1; k++) x.st |= 1u << k;   // the stations it reaches into
+            x.st |= 1u << j;
             b.st.push_back(x);
+        };
+        if (near)
+            for (const Near& q : *near) take(q.t, is_seed(q, sd));
+        else {
+            const float lim = (float)tu.window_m, *cs = C.data(), f0 = (float)sc0, fs = (float)(1 / step), fh = (float)(hw / step);
+            const size_t nt = A.size();
+            for (size_t t = 0; t < nt; t++) {   // quick tests first: in a station, then near the axis line
+                const float d[3] = {cs[3 * t] - pf[0], cs[3 * t + 1] - pf[1], cs[3 * t + 2] - pf[2]};
+                const float x = (d[0] * af[0] + d[1] * af[1] + d[2] * af[2] - f0) * fs, r = x - std::nearbyint(x);
+                if (x < -0.5f || x > ns - 0.5f || std::fabs(r) > fh + 1e-4f) continue;
+                const float u = d[0] * e1f[0] + d[1] * e1f[1] + d[2] * e1f[2];
+                if (u < -lim || u > lim) continue;
+                const float v = d[0] * e2f[0] + d[1] * e2f[1] + d[2] * e2f[2];
+                if (v < -lim || v > lim) continue;
+                take((int32_t)t, false);
+            }
         }
-        std::vector<Seg> segs = segments(b.st, tu);
+        // the stations that count: all, or in pass 2 those where pass 1's seed line is seen (the element's own: stations
+        // past its ends dilute nothing); the length they sample
+        uint32_t ref = (1u << ns) - 1;
+        if (hint) {
+            uint32_t m = 0;
+            const double hd[2] = {-hint->n[1], hint->n[0]}, ca = std::cos(tu.angle_deg * PI / 180);
+            for (const STri& x : b.st) {
+                const double off = x.q[0] * hint->n[0] + x.q[1] * hint->n[1] - hint->c, t = x.q[0] * hd[0] + x.q[1] * hd[1];
+                if (std::fabs(off) <= HINT_M && x.m[0] * hint->n[0] + x.m[1] * hint->n[1] >= ca && t >= hint->t0 - ALONG_GAP &&
+                    t <= hint->t1 + ALONG_GAP)
+                    m |= x.st;
+            }
+            if (popcount(m) >= 3) ref = m;
+        }
+        const double len = popcount(ref) * 2 * hw;
+        std::vector<Seg> segs = segments(b.st, tu, len, ref);
         double s0n[2] = {dot(n0, b.e1), dot(n0, b.e2)};
         int seed = -1;
         for (size_t i = 0; i < segs.size(); i++)
             if (segs[i].seed > 0 && (seed < 0 || segs[i].seed > segs[seed].seed)) seed = (int)i;
+        if (seed < 0 && hint) {   // pass 2: pass 1's seed line (the same frame): the segment on it overlapping it most
+            double most = 0;
+            for (size_t i = 0; i < segs.size(); i++) {
+                const Seg& g = segs[i];
+                const double over = std::min(g.t1, hint->t1) - std::max(g.t0, hint->t0);
+                if (dot2(g.n, hint->n) >= std::cos(HINT_DEG * PI / 180) && std::fabs(g.c - hint->c) <= HINT_M && over > most) most = over, seed = (int)i;
+            }
+        }
         if (seed < 0 && normalize(s0n, 2)) {   // no seed triangle in a segment: the nearest one facing as n0, within 25 cm
             double best = LINK_M;
             for (size_t i = 0; i < segs.size(); i++) {
@@ -473,8 +593,8 @@ class Faces {
                 if (dot2(segs[i].n, s0n) >= sd.cosine && dd <= best) best = dd, seed = (int)i;
             }
         }
-        if (seed < 0) throw NotFound("no side face at the click (it faces along the axis)");
-        const double weak = 2 * tu.slab_m * WEAK_M;   // the weak ones out (never the seed); the keys: by normal angle, offset, start
+        if (seed < 0) throw NotFound(NOTHING);   // no side face at the click: it faces along the axis
+        const double weak = len * WEAK_M;   // the weak ones out (never the seed); the keys: by normal angle, offset, start
         std::vector<Seg> kept;
         int s2 = -1;
         for (size_t i = 0; i < segs.size(); i++)
@@ -501,7 +621,7 @@ class Faces {
     }
 
     // 5. the links, the auto chain, the owner's choices (unknown keys are refused later), the pieces; 6. their edges
-    void choose(Build& b, const std::vector<int64_t>& on, const std::vector<int64_t>& off, const double* add, size_t nadd,
+    void choose(Build& b, const std::vector<int64_t>* on, const std::vector<int64_t>* off, const double* add, size_t nadd,
                 const double* org, const Tune& tu) const {
         const int K = (int)b.segs.size();
         b.links = link_all(b.segs, b.st);
@@ -510,7 +630,7 @@ class Faces {
         b.autos.assign(K, 0), b.ons.assign(K, 0);
         for (int k : chain) if (k >= 0) b.autos[k] = b.ons[k] = 1;
         if (!chain.empty() && chain.back() == -1) closed = true, chain.pop_back();
-        for (int64_t k : on) if (k >= 0 && k < K) b.ons[k] = 1;
+        if (on) for (int64_t k : *on) if (k >= 0 && k < K) b.ons[k] = 1;
         for (size_t i = 0; i < nadd; i++) {
             const double d[3] = {add[3 * i] - org[0], add[3 * i + 1] - org[1], add[3 * i + 2] - org[2]};
             const double u = dot(d, b.e1), v = dot(d, b.e2);
@@ -522,7 +642,7 @@ class Faces {
             }
             if (best >= 0) b.ons[best] = 1;
         }
-        for (int64_t k : off) if (k >= 0 && k < K) b.ons[k] = 0;
+        if (off) for (int64_t k : *off) if (k >= 0 && k < K) b.ons[k] = 0;
         b.pieces = assemble(b.segs, b.links, chain, closed, b.ons, b.autos, b.seed);
         int njoints = 0;
         for (Piece& pc : b.pieces) {
@@ -575,8 +695,11 @@ class Faces {
         for (const Edge& e : b.edges)
             for (const double* x : {e.a, e.b})
                 bb[0] = std::min(bb[0], x[0]), bb[1] = std::max(bb[1], x[0]), bb[2] = std::min(bb[2], x[1]), bb[3] = std::max(bb[3], x[1]);
-        const float u0 = (float)(bb[0] - NEAR_M), u1 = (float)(bb[1] + NEAR_M), v0 = (float)(bb[2] - NEAR_M), v1 = (float)(bb[3] + NEAR_M);
+        const double mg = std::max(NEAR_M, SEED_BAND);
+        const float u0 = (float)(bb[0] - mg), u1 = (float)(bb[1] + mg), v0 = (float)(bb[2] - mg), v1 = (float)(bb[3] + mg);
         const float capcos = (float)std::cos(CAP_DEG * PI / 180), nearcos = (float)std::cos(NEAR_DEG * PI / 180), nearm = (float)NEAR_M;
+        const float band = (float)SEED_BAND;
+        b.covs.assign(b.nb, 0.0);
         const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, af[3] = {(float)b.a[0], (float)b.a[1], (float)b.a[2]},
                     e1f[3] = {(float)b.e1[0], (float)b.e1[1], (float)b.e1[2]}, e2f[3] = {(float)b.e2[0], (float)b.e2[1], (float)b.e2[2]};
         struct EF { float n[2], d[2], a[2], len, c; };
@@ -601,17 +724,20 @@ class Faces {
             const float nu = n[0] * e1f[0] + n[1] * e1f[1] + n[2] * e1f[2], nv = n[0] * e2f[0] + n[1] * e2f[1] + n[2] * e2f[2];
             int best = -1;
             float bd = nearm, off = 0;
+            bool seedy = false;   // within SEED_BAND of the seed's own edges: their extent, wide enough for a drifting face
             for (int e = 0; e < E; e++) {
                 const EF& g = ef[e];
                 if (nu * g.n[0] + nv * g.n[1] < nearcos) continue;
                 const float o = u * g.n[0] + v * g.n[1] - g.c;
-                if (std::fabs(o) > bd) continue;
+                if (std::fabs(o) > (b.edges[e].seg == b.seed ? band : bd)) continue;
                 const float tt = (u - g.a[0]) * g.d[0] + (v - g.a[1]) * g.d[1];
                 if (tt < -nearm || tt > g.len + nearm) continue;
-                best = e, bd = std::fabs(o), off = o;
+                seedy |= b.edges[e].seg == b.seed;
+                if (std::fabs(o) <= bd) best = e, bd = std::fabs(o), off = o;
             }
-            if (best < 0) continue;
             const int k = std::clamp((int)std::floor(s / h) + b.side, 0, b.nb - 1);
+            if (seedy) b.covs[k] += A[t];
+            if (best < 0) continue;
             const double w = A[t];
             double* dr = &b.drift[((size_t)k * E + best) * 5];
             b.cov[(size_t)k * E + best] += w, b.sa[k] += w, b.sd[k] += w * bd * bd, b.cnt[k]++;
@@ -622,25 +748,60 @@ class Faces {
                 b.vmin[k] = std::min(b.vmin[k], sv), b.vmax[k] = std::max(b.vmax[k], sv);
             }
         }
-        auto present = [&](int k) {
-            if (!(b.total_len > 0)) return false;
-            double got = 0;
-            for (int e = 0; e < E; e++) got += std::min(b.cov[(size_t)k * E + e] / h, b.edges[e].len);
-            return got >= tu.presence * b.total_len;
+        // the extent of the profile, and of the seed segment's own edges (pass 2's range): the stations where they are
+        // present, from the click both ways until gap_m of absent ones
+        auto extent = [&](bool seed_only, double& s0, double& s1) {
+            double len = 0;
+            for (const Edge& e : b.edges) if (!seed_only || e.seg == b.seed) len += e.len;
+            s0 = -h / 2, s1 = h / 2;   // nothing present at all: 25 cm around the click
+            if (!(len > 0)) return;
+            auto present = [&](int k) {
+                double got = 0;
+                if (seed_only) got = std::min(b.covs[k] / h, len);
+                else
+                    for (int e = 0; e < E; e++) got += std::min(b.cov[(size_t)k * E + e] / h, b.edges[e].len);
+                return got >= tu.presence * len;
+            };
+            int last = -1;
+            for (int k = b.side, gap = 0; k < b.nb; k++) {
+                if (present(k)) last = k, gap = 0;
+                else if (++gap * h >= tu.gap_m - 1e-9) break;
+            }
+            if (last >= 0) s1 = std::max((double)b.vmax[last], (last - b.side) * h);
+            last = -1;
+            for (int k = b.side - 1, gap = 0; k >= 0; k--) {
+                if (present(k)) last = k, gap = 0;
+                else if (++gap * h >= tu.gap_m - 1e-9) break;
+            }
+            if (last >= 0) s0 = std::min((double)b.vmin[last], (last - b.side + 1) * h);
         };
-        int last = -1;
-        for (int k = b.side, gap = 0; k < b.nb; k++) {
-            if (present(k)) last = k, gap = 0;
-            else if (++gap * h >= tu.gap_m - 1e-9) break;
-        }
-        if (last >= 0) b.as1 = std::max((double)b.vmax[last], (last - b.side) * h);
-        last = -1;
-        for (int k = b.side - 1, gap = 0; k >= 0; k--) {
-            if (present(k)) last = k, gap = 0;
-            else if (++gap * h >= tu.gap_m - 1e-9) break;
-        }
-        if (last >= 0) b.as0 = std::min((double)b.vmin[last], (last - b.side + 1) * h);
+        extent(false, b.as0, b.as1);
+        extent(true, b.r0, b.r1);
         b.as0 = std::nearbyint(b.as0 * 1000) / 1000, b.as1 = std::nearbyint(b.as1 * 1000) / 1000;
+    }
+
+    // the share of the profile the scan covers over [s0, s1]; per edge in fcov (m^2) when given
+    double coverage(const Build& b, double s0, double s1, std::vector<double>* fcov = nullptr) const {
+        const int E = (int)b.edges.size();
+        const double h = STATION;
+        double got = 0;
+        if (fcov) fcov->assign(E, 0.0);
+        for (int k = 0; k < b.nb; k++) {   // the stations within [s0, s1], each by its overlap
+            const double b0 = (k - b.side) * h, w = std::min(b0 + h, s1) - std::max(b0, s0);
+            if (!(w > 0)) continue;
+            for (int e = 0; e < E; e++) {
+                const double c = std::min(b.cov[(size_t)k * E + e] / h, b.edges[e].len) * w;
+                got += c;
+                if (fcov) (*fcov)[e] += c;
+            }
+        }
+        return b.total_len > 0 && s1 > s0 ? got / (b.total_len * (s1 - s0)) : 0;
+    }
+
+    bool good(const Build& b) const {   // an element worth answering: long, wide and covered enough
+        double w = 0;
+        for (const Edge& e : b.edges) w += e.len;
+        return b.as1 - b.as0 >= GATE_M && w >= GATE_W && coverage(b, b.as0, b.as1) >= GATE_COVER;
     }
 
     // the axis the element's own faces say: each edge's offset drifts by k_e per metre along it (a least-squares line over
@@ -665,6 +826,8 @@ class Faces {
         const double ridge = 1e-6 * (m[0] + m[2]), d = (m[0] + ridge) * (m[2] + ridge) - m[1] * m[1];
         if (!(m[0] + m[2] > 0) || !(d > 0)) return false;
         double tau[2] = {((m[2] + ridge) * r[0] - m[1] * r[1]) / d, ((m[0] + ridge) * r[1] - m[1] * r[0]) / d};
+        if (std::fabs(b.a[2]) < 0.9)   // a level axis stays level: its yaw only, from the faces that see it (a sloped
+            tau[0] = r[0] / (m[0] + ridge), tau[1] = 0;   // face's pitch differs from click to click, 5 cm over 38 m)
         const double l = std::hypot(tau[0], tau[1]);
         if (!(l >= DRIFT_MIN)) return false;
         if (l > DRIFT_MAX) tau[0] *= DRIFT_MAX / l, tau[1] *= DRIFT_MAX / l;
@@ -739,8 +902,8 @@ class Faces {
         if (dot(c, G[g]) >= std::cos(SNAP_DEG * PI / 180)) std::copy(G[g], G[g] + 3, c);
     }
 
-    // 2. the axis: across the clicked face's narrowest extent, among its candidates; ties by the side-face area within 2 m
-    void choose_axis(const std::vector<Near>& near, const double* p, const double* n0, const Tune& tu, double* out) const {
+    // 2. the axes, best first: across the clicked face's narrowest extent, among its candidates; ties by the side-face area within 2 m
+    std::vector<std::array<double, 3>> choose_axes(const std::vector<Near>& near, const double* p, const double* n0, const Tune& tu) const {
         std::vector<std::array<double, 3>> cand;
         auto put = [&](double* c) {
             if (!normalize(c)) return;
@@ -794,9 +957,10 @@ class Faces {
             for (int k = 0; k < 3; k++) c[k] = G[g][k] - dot(G[g], n0) * n0[k];
             put(c);
         }
-        if (cand.empty()) throw NotFound("no axis at the click");
+        if (cand.empty()) throw NotFound(NOTHING);
         const double sup = std::sin(SUPPORT_DEG * PI / 180);
         size_t pick = 0;
+        std::vector<double> width(cand.size(), 0.0);
         if (cand.size() > 1) {
             std::vector<int32_t> plane;   // n0's plane: the triangles within angle_deg of n0, within PLANE_M of the click's plane
             const double ca = std::cos(tu.angle_deg * PI / 180);
@@ -805,7 +969,7 @@ class Faces {
                 const double d[3] = {c[0] - p[0], c[1] - p[1], c[2] - p[2]};
                 if (A[q.t] > 0 && dot(&N[3 * q.t], n0) >= ca && std::fabs(dot(d, n0)) <= PLANE_M) plane.push_back(q.t);
             }
-            std::vector<double> width(cand.size()), score(cand.size(), 0.0);
+            std::vector<double> score(cand.size(), 0.0);
             std::vector<std::pair<float, float>> iv;
             for (size_t i = 0; i < cand.size(); i++) {
                 const double* c = cand[i].data();
@@ -841,23 +1005,30 @@ class Faces {
             for (size_t i = 0; i < cand.size(); i++)
                 if (width[i] <= TIE * wmin + 0.05 && (width[pick] > TIE * wmin + 0.05 || score[i] > score[pick])) pick = i;
         }
-        double c[3] = {cand[pick][0], cand[pick][1], cand[pick][2]}, m[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, w[3], v[3];
-        for (int32_t t : close) {   // refined: the least eigenvector of its side faces' sum(A n n^T), when they span two directions
-            const float* n = &N[3 * t];
-            if (!(std::fabs(dot(n, c)) < sup)) continue;
-            for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) m[i][j] += (double)A[t] * n[i] * n[j];
+        std::vector<size_t> order(cand.size());   // the pick, then the others narrowest first: the gate's fallbacks
+        for (size_t i = 0; i < order.size(); i++) order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t x, size_t y) { return x == pick || (y != pick && width[x] < width[y]); });
+        std::vector<std::array<double, 3>> out;
+        for (size_t i : order) {
+            double c[3] = {cand[i][0], cand[i][1], cand[i][2]}, m[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}, w[3], v[3];
+            for (int32_t t : close) {   // refined: the least eigenvector of its side faces' sum(A n n^T), when they span two directions
+                const float* n = &N[3 * t];
+                if (!(std::fabs(dot(n, c)) < sup)) continue;
+                for (int a = 0; a < 3; a++) for (int j = 0; j < 3; j++) m[a][j] += (double)A[t] * n[a] * n[j];
+            }
+            least_eigvec(m, w, v);
+            if (w[1] > 0.05 * w[2] && std::fabs(dot(v, c)) >= std::cos(SUPPORT_DEG * PI / 180)) {
+                if (dot(v, c) < 0) for (int k = 0; k < 3; k++) v[k] = -v[k];
+                std::copy(v, v + 3, c);
+            }
+            snap_axis(c);
+            out.push_back({c[0], c[1], c[2]});
         }
-        least_eigvec(m, w, v);
-        if (w[1] > 0.05 * w[2] && std::fabs(dot(v, c)) >= std::cos(SUPPORT_DEG * PI / 180)) {
-            if (dot(v, c) < 0) for (int k = 0; k < 3; k++) v[k] = -v[k];
-            std::copy(v, v + 3, c);
-        }
-        snap_axis(c);
-        std::copy(c, c + 3, out);
+        return out;
     }
 
     // 4. the section's candidate segments (unsorted; seed = the area of seed triangles in each)
-    static std::vector<Seg> segments(const std::vector<STri>& st, const Tune& tu) {
+    static std::vector<Seg> segments(const std::vector<STri>& st, const Tune& tu, double len, uint32_t ref) {   // ref: the stations that count
         std::vector<Seg> segs;
         if (st.empty()) return segs;
         const double ca = std::cos(tu.angle_deg * PI / 180), snap = std::cos(SNAP2_DEG * PI / 180);
@@ -871,7 +1042,7 @@ class Faces {
         auto centre = [](int b, double* o) { const double r = (b + 0.5) * PI / 180; o[0] = std::cos(r), o[1] = std::sin(r); };
         std::vector<char> alive(360, 1);
         std::vector<std::array<double, 2>> dirs;
-        const double min_area = 2 * tu.slab_m * WEAK_M;
+        const double min_area = len * WEAK_M;
         while ((int)dirs.size() < MAX_DIRS) {   // greedy peaks: the heaviest 7-degree window, its mean within angle_deg
             int b = -1;
             double bw = 0;
@@ -902,11 +1073,25 @@ class Faces {
             dirs.push_back({m[0], m[1]});
         }
         const int nd = (int)dirs.size();
-        std::vector<std::vector<int>> by(nd);   // each triangle to its nearest direction within angle_deg
+        std::vector<std::vector<int>> by(nd);   // each triangle to its nearest direction within angle_deg: by its 1-deg bin's
+        int near_dir[360][2];                   // two nearest peaks, then exactly
+        for (int j = 0; j < 360; j++) {
+            double cj[2], c0 = -2, c1 = -2;
+            centre(j, cj);
+            near_dir[j][0] = near_dir[j][1] = -1;
+            for (int d = 0; d < nd; d++) {
+                const double c = dot2(cj, dirs[d].data());
+                if (c > c0) c1 = c0, near_dir[j][1] = near_dir[j][0], c0 = c, near_dir[j][0] = d;
+                else if (c > c1) c1 = c, near_dir[j][1] = d;
+            }
+        }
         for (size_t i = 0; i < st.size(); i++) {
+            double ang = std::atan2((double)st[i].m[1], (double)st[i].m[0]) * 180 / PI;
+            if (ang < 0) ang += 360;
             int best = -1;
             double bc = ca;
-            for (int d = 0; d < nd; d++) {
+            for (int d : near_dir[std::min(359, (int)ang)]) {
+                if (d < 0) continue;
                 const double c = st[i].m[0] * dirs[d][0] + st[i].m[1] * dirs[d][1];
                 if (c >= bc) bc = c, best = d;
             }
@@ -945,23 +1130,28 @@ class Faces {
                 if (hs[b] > 0 && (b == 0 || hs[b] > hs[b - 1]) && (b == nb - 1 || hs[b] >= hs[b + 1])) peaks.push_back(b);
             std::stable_sort(peaks.begin(), peaks.end(), [&](int x, int y) { return hs[x] > hs[y]; });
             const int sep = (int)std::lround(MODE_SEP / OFFSET_BIN);
+            std::set<int> kept;   // a hill of its own against its nearest kept modes each side (farther ones lie past them)
             for (int b : peaks) {
                 bool own = true;
-                for (int k : modes) {
+                const auto r = kept.lower_bound(b);
+                for (const auto& k : {r == kept.end() ? -1 : *r, r == kept.begin() ? -1 : *std::prev(r)}) {
+                    if (k < 0) continue;
                     if (std::abs(b - k) < sep) { own = false; break; }
                     double low = INFINITY;
                     for (int j = std::min(b, k); j <= std::max(b, k); j++) low = std::min(low, hs[j]);
                     if (low >= 0.5 * hs[b]) { own = false; break; }
                 }
-                if (own) modes.push_back(b);
+                if (own) kept.insert(b);
             }
+            modes.assign(kept.begin(), kept.end());   // ascending
             lines.assign(modes.size(), {});
-            for (int i : ids) {
+            for (int i : ids) {   // the nearest mode within OFFSET_BAND
                 const double o = (st[i].q[0] * D[0] + st[i].q[1] * D[1] - lo) / OFFSET_BIN - 0.5;
+                const size_t r = std::lower_bound(modes.begin(), modes.end(), o) - modes.begin();
                 int best = -1;
                 double bd = OFFSET_BAND / OFFSET_BIN;
-                for (size_t k = 0; k < modes.size(); k++)
-                    if (std::fabs(o - modes[k]) <= bd) bd = std::fabs(o - modes[k]), best = (int)k;
+                for (size_t k : {r, r - 1})
+                    if (k < modes.size() && std::fabs(o - modes[k]) <= bd) bd = std::fabs(o - modes[k]), best = (int)k;
                 if (best >= 0) lines[best].push_back(i);
             }
             const double dd[2] = {-D[1], D[0]};
@@ -979,13 +1169,13 @@ class Faces {
                     iv.push_back({a, b, i});
                     t0 = std::min(t0, (double)a), t1 = std::max(t1, (double)b);
                 }
-                const int nt = (int)((t1 - t0) / ALONG_BIN) + 1, need = (int)std::ceil(PERSIST * NS - 1e-9);
+                const int nt = (int)((t1 - t0) / ALONG_BIN) + 1, need = (int)std::ceil(PERSIST * popcount(ref) - 1e-9);
                 mask.assign(nt, 0), keep.assign(nt, 0);
                 for (const Iv& x : iv) {
                     const int b0 = (int)((x.lo - t0) / ALONG_BIN), b1 = std::min(nt - 1, (int)((x.hi - t0) / ALONG_BIN));
                     for (int b = b0; b <= b1; b++) mask[b] |= st[x.i].st, keep[b] |= st[x.i].seed;
                 }
-                for (int b = 0; b < nt; b++) keep[b] |= popcount(mask[b]) >= need;
+                for (int b = 0; b < nt; b++) keep[b] |= popcount(mask[b] & ref) >= need;
                 const double off = lo + (modes[k] + 0.5) * OFFSET_BIN;
                 const int gap = (int)std::lround(ALONG_GAP / ALONG_BIN);
                 for (int b = 0; b < nt;) {
@@ -1002,7 +1192,7 @@ class Faces {
                     if (!run.empty() && r1 > r0) {
                         const double p0[2] = {off * D[0] + r0 * dd[0], off * D[1] + r0 * dd[1]};
                         const double p1[2] = {off * D[0] + r1 * dd[0], off * D[1] + r1 * dd[1]};
-                        segs.push_back(fit(st, run, p0, p1, snap));
+                        segs.push_back(fit(st, run, p0, p1, snap, ref));
                     }
                     b = last + 1;
                 }
@@ -1031,7 +1221,7 @@ class Faces {
     }
 
     // a segment of its triangles: its own normal (snapped) and offset; its extent the run p0 -> p1 projected onto it
-    static Seg fit(const std::vector<STri>& st, const std::vector<int>& run, const double* p0, const double* p1, double snap) {
+    static Seg fit(const std::vector<STri>& st, const std::vector<int>& run, const double* p0, const double* p1, double snap, uint32_t ref) {
         Seg g{{0, 0}, 0, 0, 0, 0, 0, 0, 0};
         uint32_t seen = 0;
         for (int i : run) g.n[0] += (double)st[i].a * st[i].m[0], g.n[1] += (double)st[i].a * st[i].m[1], g.area += st[i].a, seen |= st[i].st;
@@ -1046,7 +1236,7 @@ class Faces {
         }
         g.rms = std::sqrt(g.rms / g.area);
         g.t0 = std::min(dot2(d, p0), dot2(d, p1)), g.t1 = std::max(dot2(d, p0), dot2(d, p1));
-        for (int b = 0; b < NS; b++) g.persist += (seen >> b & 1) / (double)NS;
+        g.persist = popcount(seen & ref) / (double)std::max(1, popcount(ref));
         return g;
     }
 
@@ -1127,7 +1317,8 @@ class Faces {
         std::vector<int> chain{seed};
         std::vector<char> in(segs.size(), 0);
         in[seed] = 1;
-        auto near_ok = [&](const Seg& g, double t) { double q[2]; at(g, t, q); return std::hypot(q[0], q[1]) <= tu.element_m; };
+        // within element_m of the seed segment (not of the click: then a click near a wide face's edge would reach further)
+        auto near_ok = [&](const Seg& g, double t) { double q[2]; at(g, t, q); return dist_to(segs[seed], q[0], q[1]) <= tu.element_m; };
         auto ok = [&](const Link& l, int k) {   // convex, or concave into a short segment; never into a ragged one
             const double len = segs[k].t1 - segs[k].t0;
             return (l.convex || len < tu.concave_max_m) && segs[k].rms <= std::max(RMS_M, RMS_FRAC * len);

@@ -299,17 +299,51 @@ def test_f_keys_are_stable_across_refits(slab):
     assert {**a, "ms": 0} == {**b, "ms": 0}
 
 
+def profile(r):   # what must not depend on where the element is clicked: its faces' widths, its extent, its axis
+    widths = sorted(f["width"] for f in side_faces(r))
+    a, o = np.array(r["axis"]), np.array(r["origin"])
+    return widths, sorted((o + s * a) @ a for s in (r["s0"], r["s1"])), a * np.sign(a @ (1, 1, 1))
+
+
+def test_f_the_same_element_wherever_it_is_clicked(slab):
+    """A prism has one cross-section: clicks along the girder (its bottom, its webs, at six stations, at different heights)
+    and along the soffit bay give the same faces (widths within 2 cm), the same extent (0.3 m) and the same axis."""
+    for clicks in ([((x, -2.0, -0.8), (0.1, 0.2, 1)) for x in (1.5, 4, 7.5, 11, 14, 18.5)] +
+                   [((x, -2.25, z), (0, 1, 0.1)) for x, z in ((3, -0.6), (9, -0.4), (16, -0.2))],
+                   [((x, y, 0.0), (0, 0.1, 1)) for x, y in ((2, -1.2), (6, 0.3), (10, 1.1), (13, -0.4), (17, 0.8))]):
+        ref = profile(slab.element(*clicks[0]))
+        for p, d in clicks[1:]:
+            got = profile(slab.element(p, d))
+            assert len(got[0]) == len(ref[0]) and np.allclose(got[0], ref[0], atol=0.02), (p, got[0], ref[0])
+            assert np.allclose(got[1], ref[1], atol=0.3) and angle(got[2], ref[2]) < 0.1, (p, got[1], ref[1])
+
+
 # ---------------------------------------------------------------- (g) nothing there, and bad arguments
+NOTHING = "Ovdje nije prepoznat element"   # the LookupError's text: the viewer shows it
+
+
 def test_g_a_click_in_the_air_is_a_lookup_error(slab):
-    with pytest.raises(LookupError, match="within 1 m"):
+    with pytest.raises(LookupError, match=NOTHING):
         slab.element((10, 0, 3.0), (0, 0, -1))                     # 2.75 m above the deck
-    with pytest.raises(LookupError, match="within 1 m"):
+    with pytest.raises(LookupError, match=NOTHING):
         slab.element((-3, -8, -3.5), (0, 0, 1))                    # under the ground, looking up at its back
-    with pytest.raises(LookupError, match="side face"):            # an axis along the clicked face's normal
+    with pytest.raises(LookupError, match=NOTHING):                # an axis along the clicked face's normal
         slab.element((10, 0, 0.25), (0, 0, -1), axis=slab.R @ (0, 0, 1.0))
     empty = faces_core.Faces(np.zeros((0, 3)), np.zeros((0, 3), np.int64))
-    with pytest.raises(LookupError):
+    with pytest.raises(LookupError, match=NOTHING):
         empty.element((0, 0, 0), (0, 0, 1))
+
+
+def test_g_a_click_on_something_too_small_is_no_element():
+    """The gate: an element shorter than 1 m (a 30 cm box on the ground) along every axis tried is no element; the ground
+    beside it is one (a plane, 10 m). No holes here: one patch would take the whole box."""
+    rng = np.random.default_rng(4)
+    ground, cube = quad(rng, (-5, -5, 0), (10, 0, 0), (0, 10, 0)), box(rng, (0, 0, 0), (0.3, 0.3, 0.3), skip=("z-",), step=0.05)
+    scene = Scene(*scanned(rng, *join(ground, cube), holes=0), np.eye(3))
+    with pytest.raises(LookupError, match=NOTHING):
+        scene.element((0.3, 0.15, 0.15), (-1, 0, 0))
+    r = check(scene.element((-3, -2, 0), (0, 0, -1)))
+    assert r["s1"] - r["s0"] > 5 and min(f["width"] for f in side_faces(r)) > 5
 
 
 def test_g_bad_arguments_are_value_errors(slab):
@@ -384,7 +418,7 @@ def test_i_the_server_answers_element(tmp_path, slab):
             code, kind, body = post(on, bad)
             assert code == 400 and kind == "application/json" and list(body) == ["error"], bad
         code, kind, body = post(on, json.dumps({**click, "point": slab.at(10, 0, 30).tolist()}).encode())   # in the air
-        assert code == 422 and kind == "application/json" and "within 1 m" in body["error"]
+        assert code == 422 and kind == "application/json" and body["error"] == NOTHING
         code, kind, body = post(off, json.dumps(click).encode())
         assert code == 503 and kind == "application/json" and list(body) == ["error"]
         (tmp_path / "faces.js").write_text("faces.js")                    # the viewer's half: served, never stored

@@ -426,7 +426,7 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None, faces=N
                 return self.reply(400, json.dumps({"error": str(exc)}).encode())
             try:   # no lock: element only reads the mesh, takes ~5-10 ms and releases the GIL
                 body, code = faces.element(**req), 200
-            except LookupError as exc:   # no element there: nothing faces the viewer at the click, no side face
+            except LookupError as exc:   # no element there: "Ovdje nije prepoznat element", for the viewer to show
                 body, code = json.dumps({"error": str(exc)}).encode(), 422
             except (ValueError, TypeError) as exc:   # a value or a type element refuses
                 body, code = json.dumps({"error": str(exc)}).encode(), 400
