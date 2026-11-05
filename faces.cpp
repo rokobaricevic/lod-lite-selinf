@@ -113,25 +113,34 @@ namespace py = pybind11;
 static constexpr double PI = 3.14159265358979323846;
 static constexpr double SEED_R[3] = {0.25, 0.5, 1.0};   // the seed's radius, grown until a triangle faces the viewer
 static constexpr double SEED_DEG = 30, SEED_NEAR = 1.5; // the seed: within this of the clicked triangle's normal; its candidates
+static constexpr double RAY_M = 1.0;                    // the view ray is cast from this before the click to this past it
 static const char* const NOTHING = "Ovdje nije prepoznat element";   // the LookupError (422): the viewer shows it
 static constexpr double FIT_DEG = 20, FIT_M = 0.05, N0_SNAP_DEG = 5;   // the clicked plane's fit; its snap onto L / T / Z
 static constexpr double GATHER_M = 8, CAND_R = 2;       // the gathered sphere; the axis candidates' and scores' sphere
 static constexpr double GLOBAL_DEG = 15;                // L / T / Z are candidates within this of perpendicular to n0
 static constexpr double SUPPORT_DEG = 10, SNAP_DEG = 5; // a side face of an axis; an axis this close to L / T / Z
 static constexpr double PLANE_M = 0.10, BRIDGE_M = 1.0, TIE = 1.25;   // the seed plane's width: offset, holes, ties
-static constexpr double SIDE_DEG = 25, SNAP2_DEG = 2;   // section triangles; a direction this close to e1 / e2
+static constexpr double SIDE_DEG = 25, SNAP2_DEG = 3;   // section triangles; a direction this close to e1 / e2
 static constexpr double OFFSET_BIN = 0.01, MODE_SEP = 0.05, OFFSET_BAND = 0.08;   // a direction's lines: offset modes
 static constexpr double ALONG_BIN = 0.05, ALONG_GAP = 0.25, WEAK_M = 0.05, PERSIST = 0.35;
-static constexpr int NS = 16, NS2 = 24;                 // stations: pass 1's slab, pass 2's extent, at most
+static constexpr int NS = 16, NSMAX = 256;              // stations: pass 1's slab; either pass's at most (a bitset)
+static constexpr double STEP2 = 0.5;                    // pass 2: a station STATION2 long every STEP2 along the element
+static constexpr double TUKEY_M = 0.03, MODE_BIN = 0.005;   // a line's offset: its offsets' mode, then Tukey's biweight
+static constexpr double SQUARE_DEG = 4;                 // linked faces this close to square or to parallel are made so
+static constexpr double PLATE_DEG = 12, PLATE_M = 0.10, PLATE_OVER = 0.5, PLATE_MIN = 0.05;   // a thin plate's two skins
+static constexpr double LINE_DEG = 3, LINE_M = 0.02, JOIN_M = 0.6, JOIN_PLATE_M = 1.5;   // collinear: one face over a gap
+static constexpr int WRAP_STEPS = 8;                    // round a plate's end (a flange): links at most
+static constexpr double ALT_M = 0.10;                   // a link this much further than the closest may go on instead
+static constexpr double LINE_PLATE_M = 0.04;            // a plate's skin: collinear within this (its skins: 3-6 cm, facing apart)
 static constexpr double HINT_DEG = 10, HINT_M = 0.10;   // pass 2's seed segment: on pass 1's seed line within these
 static constexpr double LINK_M = 0.25, OVER_MIN = 0.04, OVER_M = 0.10, OVER_FRAC = 0.25, PARALLEL_DEG = 20, AHEAD_M = 0.05;
 static constexpr double TIP_IN_M = 0.02, TIP_OUT_M = 0.15, TIP_SIDE_M = 0.03;   // the space a plate's tip must have
-static constexpr double RMS_M = 0.02, RMS_FRAC = 0.03;  // the chain grows only into segments this straight
+static constexpr double RMS_M = 0.03, RMS_FRAC = 0.03;  // the chain grows only into segments this straight
 static constexpr double SHORT_M = 0.2, SHORT_PEN = 0.1; // a shorter one competes for a link as this much further away
 static constexpr double SELF_M = 0.02, LOOSE_M = 0.15;  // a profile never comes this close to itself; but its loose ends
 static constexpr double DRIFT_MIN = 5e-4, DRIFT_MAX = 0.0175, DRIFT_SPAN = 1.0;   // an auto axis: its tilt (rad), a drift's spread (m)
 static constexpr double STATION = 0.25, NEAR_M = 0.08, NEAR_DEG = 30, STATION2 = 0.25;   // pass 2: a station's length
-static constexpr double SEED_BAND = 0.25, RANGE_M = 1;  // the seed face's extent: its triangles this far off it; pass 2 past it
+static constexpr double SEED_BAND = 0.25;               // the seed face's extent: its triangles this far off it
 static constexpr double GATE_M = 1.0, GATE_W = 0.05, GATE_COVER = 0.25;   // an automatic axis's element: long, wide, covered
 static constexpr size_t GATE_TRIES = 3;                 // axes tried
 static constexpr double CAP_DEG = 25, CAP_M = 0.15, CAP_FILL = 0.3, CAP_BACK = 0.5, ADD_M = 0.15;
@@ -220,10 +229,24 @@ static void vec(std::string& s, const double* v, int k, double scale) {
     s += "]";
 }
 
+static inline int pop64(uint64_t x) {   // set bits (MSVC has no __builtin_popcountll, C++17 no std::popcount)
+    x = x - ((x >> 1) & 0x5555555555555555ull);
+    x = (x & 0x3333333333333333ull) + ((x >> 2) & 0x3333333333333333ull);
+    x = (x + (x >> 4)) & 0x0f0f0f0f0f0f0f0full;
+    return (int)((x * 0x0101010101010101ull) >> 56);
+}
+struct SSet {   // a set of stations, NSMAX at most
+    uint64_t w[NSMAX / 64] = {};
+    void add(int a, int b) { for (int k = std::max(a, 0); k <= b && k < NSMAX; k++) w[k >> 6] |= 1ull << (k & 63); }
+    SSet& operator|=(const SSet& o) { for (int i = 0; i < NSMAX / 64; i++) w[i] |= o.w[i]; return *this; }
+    int count() const { int n = 0; for (uint64_t x : w) n += pop64(x); return n; }
+    int common(const SSet& o) const { int n = 0; for (int i = 0; i < NSMAX / 64; i++) n += pop64(w[i] & o.w[i]); return n; }
+};
+
 struct Near { int32_t t; float d2; };   // a triangle near the click: index, squared distance
 struct STri {                           // a section triangle: centre, unit 2D normal, vertices, area, the stations it spans
     float q[2], m[2], x[3][2], a;
-    uint32_t st;
+    uint16_t k0, k1;
     int32_t t;
     bool seed;
 };
@@ -293,27 +316,34 @@ class Faces {
             if (!std::isfinite(add[i])) throw std::invalid_argument("add must be points of 3 finite numbers");
         double org[3], p[3];   // the origin: the click to the millimetre (world), and relative to O
         for (int k = 0; k < 3; k++) org[k] = std::nearbyint(point[k] * 1000) / 1000, p[k] = org[k] - O[k];
-        const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]};
 
-        // 1. everything within reach of the click; the seed: the triangles nearest it that face the viewer, n0
-        const double reach = std::max(axis ? SEED_R[2] : GATHER_M, std::hypot(tu.slab_m, tu.window_m)) + 0.01;
+        // 1. everything within reach of the click; the clicked triangle: the view ray's first hit, n0
+        const double reach = std::max(axis ? RAY_M + SEED_NEAR : GATHER_M, std::hypot(tu.slab_m, tu.window_m)) + 0.01;
         std::vector<Near> near;
         {
-            const float r2 = (float)(reach * reach);
+            const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, r2 = (float)(reach * reach);
             const size_t nt = A.size();
             for (size_t t = 0; t < nt; t++) {
                 const float dx = C[3 * t] - pf[0], dy = C[3 * t + 1] - pf[1], dz = C[3 * t + 2] - pf[2], d2 = dx * dx + dy * dy + dz * dz;
                 if (d2 <= r2) near.push_back({(int32_t)t, d2});
             }
         }
-        int32_t nearest = -1;   // the triangle under the click: the nearest facing the viewer (not by its centre: near a
-        double best = INFINITY; // face's edge, a small one of the next face can be centred nearer than the big one clicked)
-        for (const Near& q : near) {
-            if (q.d2 > SEED_NEAR * SEED_NEAR || !(A[q.t] > 0) || dot(&N[3 * q.t], sd.vd) >= 0) continue;
-            const double d2 = tri_dist2(p, &V[3 * (size_t)F[3 * (size_t)q.t]], &V[3 * (size_t)F[3 * (size_t)q.t + 1]], &V[3 * (size_t)F[3 * (size_t)q.t + 2]]);
-            if (d2 < best) best = d2, nearest = q.t;
+        int32_t nearest = ray(near, p, sd.vd);   // the first hit: the click moves onto it, to the millimetre
+        if (nearest >= 0) {
+            for (int k = 0; k < 3; k++) org[k] = std::nearbyint((p[k] + O[k]) * 1000) / 1000, p[k] = org[k] - O[k];
+            for (Near& q : near) {
+                const float* c = &C[3 * (size_t)q.t];
+                q.d2 = (float)((c[0] - p[0]) * (c[0] - p[0]) + (c[1] - p[1]) * (c[1] - p[1]) + (c[2] - p[2]) * (c[2] - p[2]));
+            }
+        } else {   // the ray misses: the nearest facing the viewer (not by its centre: near a face's edge, a small one of
+            double best = INFINITY;   // the next face can be centred nearer than the big one clicked), within SEED_R[2]
+            for (const Near& q : near) {
+                if (q.d2 > SEED_NEAR * SEED_NEAR || !(A[q.t] > 0) || dot(&N[3 * q.t], sd.vd) >= 0) continue;
+                const double d2 = tri_dist2(p, &V[3 * (size_t)F[3 * (size_t)q.t]], &V[3 * (size_t)F[3 * (size_t)q.t + 1]], &V[3 * (size_t)F[3 * (size_t)q.t + 2]]);
+                if (d2 < best) best = d2, nearest = q.t;
+            }
+            if (nearest < 0 || best > SEED_R[2] * SEED_R[2]) throw NotFound(NOTHING);
         }
-        if (nearest < 0 || best > SEED_R[2] * SEED_R[2]) throw NotFound(NOTHING);
         {   // the seed: within SEED_R[0] of the click, or as far as the clicked triangle's centre
             const float* c = &C[3 * (size_t)nearest];
             const double dc = std::hypot(c[0] - p[0], c[1] - p[1], c[2] - p[2]) + 0.02;
@@ -346,10 +376,10 @@ class Faces {
             choose(one, nullptr, nullptr, nullptr, 0, org, tu);
             sweep(one, p, tu);
             if (!axis && !good(one)) continue;
-            Build two;   // pass 2, along the clicked face's whole extent (and RANGE_M past it: only its stations count),
-            if (axis || !tilt(one, two.a)) std::copy(one.a, one.a + 3, two.a);   // with the axis tilted to the element's drift
+            Build two;   // pass 2, along the element's whole extent (pass 1's profile's and the clicked face's), every
+            if (axis || !tilt(one, two.a)) std::copy(one.a, one.a + 3, two.a);   // station counting; the axis tilted to its drift
             try {
-                section(two, nullptr, p, n0, sd, tu, std::min(one.r0, -tu.slab_m) - RANGE_M, std::max(one.r1, tu.slab_m) + RANGE_M,
+                section(two, nullptr, p, n0, sd, tu, std::min({one.as0, one.r0, -tu.slab_m}), std::max({one.as1, one.r1, tu.slab_m}),
                         &one.segs[one.seed]);
                 choose(two, &on, &off, add, nadd, org, tu);
                 sweep(two, p, tu);
@@ -473,6 +503,7 @@ class Faces {
         std::vector<Seg> segs;
         int seed = -1;
         std::vector<Link> links;
+        std::vector<std::vector<int>> mate;   // per segment: the other skins of its thin plate
         std::vector<char> autos, ons;
         std::vector<Piece> pieces;
         std::vector<Edge> edges;
@@ -480,6 +511,8 @@ class Faces {
         std::vector<std::array<double, 2>> poly;   // the main piece's profile closed by its chord
         double poly_area = 0, total_len = 0, as0 = 0, as1 = 0, r0 = 0, r1 = 0;   // r0, r1: the seed segment's own extent
         int side = 0, nb = 0;   // stations k - side: [(k - side) h, (k - side + 1) h)
+        int ns = 0;             // the section's stations, each slen long
+        double slen = 0;
         std::vector<double> cov, sa, sd, drift;   // per station: per edge its supported area; area, area x dist^2; per edge 5 sums
         std::vector<double> covs;                 // per station: the seed's edges' area within SEED_BAND
         std::vector<int32_t> cnt;
@@ -487,14 +520,46 @@ class Faces {
         std::vector<CapTri> capt;
     };
 
+    // the view ray from RAY_M before the click to RAY_M past it, against the gathered triangles facing the viewer
+    // (Moller-Trumbore): the hit nearest the click along it -- its triangle, p moved onto it --; -1 (p as it was) when it
+    // misses. The point the viewer sends comes from the LOD tile it shows, up to ~1 % of the distance off the bake mesh
+    // (7-12 cm at 7 m): near an edge the nearest triangle can be the next face's; the ray's is the face the owner sees.
+    // Nearest the click, not the first from RAY_M before it: something within a metre in front that the tile does not
+    // have (a pipe before a girder's web, a railing's bar) would be what the viewer's own ray hit, were it there.
+    int32_t ray(const std::vector<Near>& near, double* p, const double* vd) const {
+        const double o[3] = {p[0] - RAY_M * vd[0], p[1] - RAY_M * vd[1], p[2] - RAY_M * vd[2]};
+        const float lim2 = (float)((RAY_M + SEED_NEAR) * (RAY_M + SEED_NEAR));
+        int32_t hit = -1;
+        double th = INFINITY;
+        for (const Near& q : near) {
+            if (q.d2 > lim2 || !(A[q.t] > 0) || !(dot(&N[3 * (size_t)q.t], vd) < 0)) continue;
+            const float* a = &V[3 * (size_t)F[3 * (size_t)q.t]];
+            const float* b = &V[3 * (size_t)F[3 * (size_t)q.t + 1]];
+            const float* c = &V[3 * (size_t)F[3 * (size_t)q.t + 2]];
+            double e1[3], e2[3], s[3], pv[3], qv[3];
+            for (int k = 0; k < 3; k++) e1[k] = b[k] - a[k], e2[k] = c[k] - a[k], s[k] = o[k] - a[k];
+            cross(vd, e2, pv);
+            const double det = dot(e1, pv);
+            if (!(std::fabs(det) > 1e-15)) continue;
+            const double u = dot(s, pv) / det;
+            if (!(u >= 0 && u <= 1)) continue;
+            cross(s, e1, qv);
+            const double v = dot(vd, qv) / det, t = dot(e2, qv) / det;
+            if (v >= 0 && u + v <= 1 && t >= 0 && t <= 2 * RAY_M && (hit < 0 || std::fabs(t - RAY_M) < std::fabs(th - RAY_M))) th = t, hit = q.t;
+        }
+        if (hit >= 0) for (int k = 0; k < 3; k++) p[k] = o[k] + th * vd[k];
+        return hit;
+    }
+
     bool is_seed(const Near& q, const Seed& sd) const {
         return q.d2 <= sd.r2 && A[q.t] > 0 && dot(&N[3 * q.t], sd.vd) < 0 && dot(&N[3 * q.t], sd.nn) >= sd.cosine;
     }
 
     // 3. the section frame of b.a; 4. its candidate segments, the seed's, the keys. near given: pass 1, the gathered
-    // triangles within [r0, r1] of the click along the axis, in NS stations. Null: pass 2, every triangle in up to NS
-    // stations STATION2 long spread along [r0, r1], on a grid fixed to the mesh (not to the click): any click on an
-    // element samples it alike; the seed segment is then the one under the click, facing as n0.
+    // triangles within [r0, r1] of the click along the axis, in NS stations. Null: pass 2, every triangle in the stations
+    // STATION2 long every STEP2 at multiples of it from the mesh's centre (a grid fixed to the mesh, not to the click)
+    // over [r0, r1], the element's extent: any click on an element samples it alike; the seed segment is then the one
+    // on pass 1's seed line.
     void section(Build& b, const std::vector<Near>* near, const double* p, const double* n0, const Seed& sd, const Tune& tu,
                  double r0, double r1, const Seg* hint = nullptr) const {
         double* a = b.a;
@@ -510,10 +575,10 @@ class Faces {
         int ns = NS;
         if (near) {
             step = (r1 - r0) / NS, hw = step / 2, sc0 = r0 + hw;
-        } else {   // STATION2 times a power of two apart, at multiples of it from the mesh's centre: one grid for every click
+        } else {   // STEP2 apart (twice that per 128 m past it), at multiples of it from the mesh's centre
             const double at = dot(a, p);   // the click along the axis from the mesh's centre
-            for (step = STATION2; (r1 - r0) / step > NS2; step *= 2) {}
-            hw = STATION2 / 2, sc0 = std::ceil((r0 + at) / step) * step - at, ns = std::clamp((int)std::floor((r1 - sc0) / step) + 1, 1, NS2);
+            for (step = STEP2; (r1 - r0) / step > NSMAX - 1; step *= 2) {}
+            hw = STATION2 / 2, sc0 = std::ceil((r0 + at) / step) * step - at, ns = std::clamp((int)std::floor((r1 - sc0) / step) + 1, 1, NSMAX);
         }
         const float pf[3] = {(float)p[0], (float)p[1], (float)p[2]}, af[3] = {(float)a[0], (float)a[1], (float)a[2]},
                     e1f[3] = {(float)b.e1[0], (float)b.e1[1], (float)b.e1[2]}, e2f[3] = {(float)b.e2[0], (float)b.e2[1], (float)b.e2[2]};
@@ -529,7 +594,7 @@ class Faces {
             const float u = (float)dot(d, e1f), v = (float)dot(d, e2f);
             if (u * u + v * v > win2) return;
             const float m[2] = {(float)dot(n, e1f), (float)dot(n, e2f)}, l = std::sqrt(m[0] * m[0] + m[1] * m[1]);
-            STri x{{u, v}, {m[0] / l, m[1] / l}, {}, A[t], 0, t, seed};
+            STri x{{u, v}, {m[0] / l, m[1] / l}, {}, A[t], 0, 0, t, seed};
             double s0 = INFINITY, s1 = -INFINITY;
             for (int k = 0; k < 3; k++) {
                 const float* y = &V[3 * (size_t)F[3 * (size_t)t + k]];
@@ -537,9 +602,10 @@ class Faces {
                 const double sv = dot(w, af);
                 x.x[k][0] = (float)dot(w, e1f), x.x[k][1] = (float)dot(w, e2f), s0 = std::min(s0, sv), s1 = std::max(s1, sv);
             }
-            const int k0 = std::max(0, (int)std::ceil((s0 - hw - sc0) / step)), k1 = std::min(ns - 1, (int)std::floor((s1 + hw - sc0) / step));
-            for (int k = k0; k <= k1; k++) x.st |= 1u << k;   // the stations it reaches into
-            x.st |= 1u << j;
+            // the stations it reaches into
+            const double k0 = std::ceil((s0 - hw - sc0) / step), k1 = std::floor((s1 + hw - sc0) / step);
+            x.k0 = (uint16_t)std::clamp(std::min((double)j, k0), 0.0, (double)(ns - 1));
+            x.k1 = (uint16_t)std::clamp(std::max((double)j, k1), 0.0, (double)(ns - 1));
             b.st.push_back(x);
         };
         if (near)
@@ -558,22 +624,14 @@ class Faces {
                 take((int32_t)t, false);
             }
         }
-        // the stations that count: all, or in pass 2 those where pass 1's seed line is seen (the element's own: stations
-        // past its ends dilute nothing); the length they sample
-        uint32_t ref = (1u << ns) - 1;
-        if (hint) {
-            uint32_t m = 0;
-            const double hd[2] = {-hint->n[1], hint->n[0]}, ca = std::cos(tu.angle_deg * PI / 180);
-            for (const STri& x : b.st) {
-                const double off = x.q[0] * hint->n[0] + x.q[1] * hint->n[1] - hint->c, t = x.q[0] * hd[0] + x.q[1] * hd[1];
-                if (std::fabs(off) <= HINT_M && x.m[0] * hint->n[0] + x.m[1] * hint->n[1] >= ca && t >= hint->t0 - ALONG_GAP &&
-                    t <= hint->t1 + ALONG_GAP)
-                    m |= x.st;
-            }
-            if (popcount(m) >= 3) ref = m;
-        }
-        const double len = popcount(ref) * 2 * hw;
-        std::vector<Seg> segs = segments(b.st, tu, len, ref);
+        // the stations that count: all of them (pass 2's are the element's own extent); the length they sample. The
+        // offsets are binned from the mesh's centre, not from the click: guv is the click in the section from there.
+        SSet ref;
+        ref.add(0, ns - 1);
+        const double len = ns * 2 * hw, guv[2] = {dot(p, b.e1), dot(p, b.e2)};
+        b.ns = ns, b.slen = 2 * hw;
+        std::vector<std::vector<int>> runs;
+        std::vector<Seg> segs = segments(b.st, tu, len, ref, guv, runs);
         double s0n[2] = {dot(n0, b.e1), dot(n0, b.e2)};
         int seed = -1;
         for (size_t i = 0; i < segs.size(); i++)
@@ -594,15 +652,19 @@ class Faces {
             }
         }
         if (seed < 0) throw NotFound(NOTHING);   // no side face at the click: it faces along the axis
-        const double weak = len * WEAK_M;   // the weak ones out (never the seed); the keys: by normal angle, offset, start
+        const double weak = len * WEAK_M;   // the weak ones out (never the seed)
         std::vector<Seg> kept;
+        std::vector<std::vector<int>> kruns;
         int s2 = -1;
         for (size_t i = 0; i < segs.size(); i++)
             if ((int)i == seed || (segs[i].area >= weak && segs[i].persist >= PERSIST)) {
                 if ((int)i == seed) s2 = (int)kept.size();
-                kept.push_back(segs[i]);
+                kept.push_back(segs[i]), kruns.push_back(std::move(runs[i]));
             }
-        std::vector<int> o(kept.size());
+        merge(kept, kruns, b.st, ref, s2);    // collinear segments across a junction or a hole: one face
+        split_t(kept, kruns, b.st, ref, s2);  // a face a thin plate stands on: one either side of it
+        regularize(kept, kruns, b.st, ref);   // linked faces nearly square or parallel: exactly
+        std::vector<int> o(kept.size());   // the keys: by normal angle, offset, start
         std::vector<double> ang(kept.size());
         for (size_t i = 0; i < kept.size(); i++) {
             o[i] = (int)i;
@@ -624,8 +686,12 @@ class Faces {
     void choose(Build& b, const std::vector<int64_t>* on, const std::vector<int64_t>* off, const double* add, size_t nadd,
                 const double* org, const Tune& tu) const {
         const int K = (int)b.segs.size();
-        b.links = link_all(b.segs, b.st);
-        std::vector<int> chain = grow(b.segs, b.links, b.seed, tu);
+        b.links = link_all(b.segs, b.st, b.ns, b.slen);
+        b.mate.assign(K, {});
+        for (int i = 0; i < K; i++)
+            for (int j = i + 1; j < K; j++)
+                if (mates(b.segs[i], b.segs[j])) b.mate[i].push_back(j), b.mate[j].push_back(i);
+        std::vector<int> chain = grow(b.segs, b.links, b.mate, b.seed, tu);
         bool closed = false;
         b.autos.assign(K, 0), b.ons.assign(K, 0);
         for (int k : chain) if (k >= 0) b.autos[k] = b.ons[k] = 1;
@@ -1027,9 +1093,13 @@ class Faces {
         return out;
     }
 
-    // 4. the section's candidate segments (unsorted; seed = the area of seed triangles in each)
-    static std::vector<Seg> segments(const std::vector<STri>& st, const Tune& tu, double len, uint32_t ref) {   // ref: the stations that count
+    // 4. the section's candidate segments (unsorted; seed = the area of seed triangles in each), each with its run (the
+    // indices of its triangles). ref: the stations that count; guv: the click in the section from the mesh's centre
+    // (bins along and across the lines are fixed to the mesh, not to the click)
+    static std::vector<Seg> segments(const std::vector<STri>& st, const Tune& tu, double len, const SSet& ref, const double* guv,
+                                     std::vector<std::vector<int>>& runs) {
         std::vector<Seg> segs;
+        runs.clear();
         if (st.empty()) return segs;
         const double ca = std::cos(tu.angle_deg * PI / 180), snap = std::cos(SNAP2_DEG * PI / 180);
         double hb[360][3] = {};
@@ -1103,22 +1173,23 @@ class Faces {
         struct Iv { float lo, hi; int i; };
         std::vector<Iv> iv;
         std::vector<int> run;
-        std::vector<uint32_t> mask;
+        std::vector<SSet> mask;
         std::vector<uint8_t> keep;
         for (int d = 0; d < nd; d++) {
             const std::vector<int>& ids = by[d];
             if (ids.empty()) continue;
             const double* D = dirs[d].data();
-            // its lines: the modes of the offsets' area histogram (1 cm bins, smoothed), the highest first, each one a hill
-            // of its own (at least MODE_SEP from the others, with a valley below half its height between); each triangle
-            // to the nearest within OFFSET_BAND. (Not "split where 8 cm are empty": clutter between a girder's bottom and
-            // the soffit 43 cm above fills every gap.)
+            // its lines: the modes of the offsets' area histogram (1 cm bins from the mesh's centre, smoothed), the
+            // highest first, each one a hill of its own (at least MODE_SEP from the others, with a valley below half its
+            // height between); each triangle to the nearest within OFFSET_BAND. (Not "split where 8 cm are empty":
+            // clutter between a girder's bottom and the soffit 43 cm above fills every gap.)
             double lo = INFINITY, hi = -INFINITY;
             for (int i : ids) {
                 const double o = st[i].q[0] * D[0] + st[i].q[1] * D[1];
                 lo = std::min(lo, o), hi = std::max(hi, o);
             }
-            lo -= 3 * OFFSET_BIN;
+            const double g0 = guv[0] * D[0] + guv[1] * D[1];   // the click's offset from the mesh's centre
+            lo = std::floor((lo + g0) / OFFSET_BIN) * OFFSET_BIN - g0 - 3 * OFFSET_BIN;
             const int nb = (int)((hi - lo) / OFFSET_BIN) + 4;
             hist.assign(nb, 0.0), hs.assign(nb, 0.0);
             for (int i : ids) hist[(int)((st[i].q[0] * D[0] + st[i].q[1] * D[1] - lo) / OFFSET_BIN)] += st[i].a;
@@ -1154,11 +1225,12 @@ class Faces {
                     if (k < modes.size() && std::fabs(o - modes[k]) <= bd) bd = std::fabs(o - modes[k]), best = (int)k;
                 if (best >= 0) lines[best].push_back(i);
             }
-            const double dd[2] = {-D[1], D[0]};
+            const double dd[2] = {-D[1], D[0]}, gt = guv[0] * dd[0] + guv[1] * dd[1];
             for (size_t k = 0; k < lines.size(); k++) {
-                // its segments: where the line is persistent -- seen at >= PERSIST of the slab's stations, per 5 cm along
-                // it --, split where it is not for ALONG_GAP. A bracket, a post, a stiffener, a cross-beam's flange meeting
-                // a girder's at its level: at a few stations only, they are not the prism's (the seed's own bins always are).
+                // its segments: where the line is persistent -- seen at >= PERSIST of the stations, per 5 cm along it (bins
+                // from the mesh's centre) --, split where it is not for ALONG_GAP. A bracket, a post, a stiffener, a
+                // cross-beam's flange meeting a girder's at its level: at a few stations only, they are not the prism's
+                // (pass 1: the seed's own bins always are).
                 const std::vector<int>& line = lines[k];
                 if (line.empty()) continue;
                 iv.clear();
@@ -1169,13 +1241,14 @@ class Faces {
                     iv.push_back({a, b, i});
                     t0 = std::min(t0, (double)a), t1 = std::max(t1, (double)b);
                 }
-                const int nt = (int)((t1 - t0) / ALONG_BIN) + 1, need = (int)std::ceil(PERSIST * popcount(ref) - 1e-9);
-                mask.assign(nt, 0), keep.assign(nt, 0);
+                t0 = std::floor((t0 + gt) / ALONG_BIN) * ALONG_BIN - gt;
+                const int nt = (int)((t1 - t0) / ALONG_BIN) + 1, need = (int)std::ceil(PERSIST * ref.count() - 1e-9);
+                mask.assign(nt, SSet()), keep.assign(nt, 0);
                 for (const Iv& x : iv) {
-                    const int b0 = (int)((x.lo - t0) / ALONG_BIN), b1 = std::min(nt - 1, (int)((x.hi - t0) / ALONG_BIN));
-                    for (int b = b0; b <= b1; b++) mask[b] |= st[x.i].st, keep[b] |= st[x.i].seed;
+                    const int b0 = std::max(0, (int)((x.lo - t0) / ALONG_BIN)), b1 = std::min(nt - 1, (int)((x.hi - t0) / ALONG_BIN));
+                    for (int b = b0; b <= b1; b++) mask[b].add(st[x.i].k0, st[x.i].k1), keep[b] |= st[x.i].seed;
                 }
-                for (int b = 0; b < nt; b++) keep[b] |= popcount(mask[b] & ref) >= need;
+                for (int b = 0; b < nt; b++) keep[b] |= mask[b].common(ref) >= need;
                 const double off = lo + (modes[k] + 0.5) * OFFSET_BIN;
                 const int gap = (int)std::lround(ALONG_GAP / ALONG_BIN);
                 for (int b = 0; b < nt;) {
@@ -1193,18 +1266,13 @@ class Faces {
                         const double p0[2] = {off * D[0] + r0 * dd[0], off * D[1] + r0 * dd[1]};
                         const double p1[2] = {off * D[0] + r1 * dd[0], off * D[1] + r1 * dd[1]};
                         segs.push_back(fit(st, run, p0, p1, snap, ref));
+                        runs.push_back(run);
                     }
                     b = last + 1;
                 }
             }
         }
         return segs;
-    }
-
-    static int popcount(uint32_t x) {
-        int n = 0;
-        for (; x; x &= x - 1) n++;
-        return n;
     }
 
     static void snap2(double* m, double snap) {   // a 2D unit normal onto +-e1 / +-e2 within the snap cosine
@@ -1220,24 +1288,236 @@ class Faces {
         }
     }
 
-    // a segment of its triangles: its own normal (snapped) and offset; its extent the run p0 -> p1 projected onto it
-    static Seg fit(const std::vector<STri>& st, const std::vector<int>& run, const double* p0, const double* p1, double snap, uint32_t ref) {
+    // the offset along n of a run's triangles: the mode of their offsets (MODE_BIN bins, smoothed over +-2 cm), then
+    // Tukey's biweight at TUKEY_M from there. Rivets, a stiffener's edge, a blob within the line's band pull the mean
+    // by centimetres; they do not pull this.
+    static double robust_c(const std::vector<STri>& st, const std::vector<int>& run, const double* n) {
+        double lo = INFINITY, hi = -INFINITY;
+        for (int i : run) {
+            const double o = st[i].q[0] * n[0] + st[i].q[1] * n[1];
+            lo = std::min(lo, o), hi = std::max(hi, o);
+        }
+        if (!(hi >= lo)) return 0;
+        const int nb = std::min(2048, (int)((hi - lo) / MODE_BIN) + 1);
+        std::vector<double> h(nb, 0.0);
+        for (int i : run) h[std::clamp((int)((st[i].q[0] * n[0] + st[i].q[1] * n[1] - lo) / MODE_BIN), 0, nb - 1)] += st[i].a;
+        int best = 0;
+        double bw = -1;
+        for (int b = 0; b < nb; b++) {
+            double s = 0;
+            for (int k = -4; k <= 4; k++) if (b + k >= 0 && b + k < nb) s += (5 - std::abs(k)) * h[b + k];
+            if (s > bw) bw = s, best = b;
+        }
+        double c = lo + (best + 0.5) * MODE_BIN;
+        for (int it = 0; it < 8; it++) {
+            double sw = 0, so = 0;
+            for (int i : run) {
+                const double o = st[i].q[0] * n[0] + st[i].q[1] * n[1], r = (o - c) / TUKEY_M;
+                if (std::fabs(r) >= 1) continue;
+                const double w = st[i].a * (1 - r * r) * (1 - r * r);
+                sw += w, so += w * o;
+            }
+            if (!(sw > 0)) break;
+            const double c2 = so / sw;
+            if (std::fabs(c2 - c) < 1e-5) { c = c2; break; }
+            c = c2;
+        }
+        return c;
+    }
+
+    // a segment of its triangles: its normal the mean of its triangles', then of its inliers' (within TUKEY_M of its
+    // offset, Tukey-weighted), snapped onto e1 / e2 within SNAP2_DEG (or `fixed`); its offset robust_c's; its extent the
+    // run p0 -> p1 projected onto it; rms: of all its triangles' offsets from it
+    static Seg fit(const std::vector<STri>& st, const std::vector<int>& run, const double* p0, const double* p1, double snap, const SSet& ref,
+                   const double* fixed = nullptr) {
         Seg g{{0, 0}, 0, 0, 0, 0, 0, 0, 0};
-        uint32_t seen = 0;
-        for (int i : run) g.n[0] += (double)st[i].a * st[i].m[0], g.n[1] += (double)st[i].a * st[i].m[1], g.area += st[i].a, seen |= st[i].st;
-        normalize(g.n, 2);
-        snap2(g.n, snap);
+        SSet seen;
+        for (int i : run)
+            g.n[0] += (double)st[i].a * st[i].m[0], g.n[1] += (double)st[i].a * st[i].m[1], g.area += st[i].a, seen.add(st[i].k0, st[i].k1),
+                g.seed += st[i].seed ? st[i].a : 0;
+        if (fixed) g.n[0] = fixed[0], g.n[1] = fixed[1];
+        else {
+            normalize(g.n, 2);
+            snap2(g.n, snap);
+            g.c = robust_c(st, run, g.n);
+            double m[2] = {0, 0};
+            for (int i : run) {
+                const double r = (st[i].q[0] * g.n[0] + st[i].q[1] * g.n[1] - g.c) / TUKEY_M;
+                if (std::fabs(r) >= 1) continue;
+                const double w = st[i].a * (1 - r * r) * (1 - r * r);
+                m[0] += w * st[i].m[0], m[1] += w * st[i].m[1];
+            }
+            if (normalize(m, 2)) snap2(m, snap), g.n[0] = m[0], g.n[1] = m[1];
+        }
+        g.c = robust_c(st, run, g.n);
         const double d[2] = {-g.n[1], g.n[0]};
-        for (int i : run) g.c += (double)st[i].a * (st[i].q[0] * g.n[0] + st[i].q[1] * g.n[1]), g.seed += st[i].seed ? st[i].a : 0;
-        g.c /= g.area;
         for (int i : run) {
             const double r = st[i].q[0] * g.n[0] + st[i].q[1] * g.n[1] - g.c;
             g.rms += st[i].a * r * r;
         }
         g.rms = std::sqrt(g.rms / g.area);
         g.t0 = std::min(dot2(d, p0), dot2(d, p1)), g.t1 = std::max(dot2(d, p0), dot2(d, p1));
-        g.persist = popcount(seen & ref) / (double)std::max(1, popcount(ref));
+        g.persist = seen.common(ref) / (double)std::max(1, ref.count());
         return g;
+    }
+
+    // two skins of one thin plate (a steel web or flange; concrete here is 15 cm and more): facing apart within PLATE_DEG,
+    // the material between them PLATE_M thick at most, overlapping along half the shorter (PLATE_MIN at least)
+    static bool mates(const Seg& a, const Seg& b) {
+        if (dot2(a.n, b.n) > -std::cos(PLATE_DEG * PI / 180)) return false;
+        const double da[2] = {-a.n[1], a.n[0]};
+        double p[2], q[2], m[2];
+        at(b, b.t0, p), at(b, b.t1, q);
+        const double u0 = std::max(a.t0, std::min(dot2(da, p), dot2(da, q))), u1 = std::min(a.t1, std::max(dot2(da, p), dot2(da, q)));
+        if (!(u1 - u0 >= std::max(PLATE_MIN, PLATE_OVER * std::min(a.t1 - a.t0, b.t1 - b.t0)))) return false;
+        at(a, (u0 + u1) / 2, m);   // the overlap's middle on a: behind b, within PLATE_M
+        const double th = b.c - dot2(b.n, m);
+        return th > 0 && th <= PLATE_M;
+    }
+
+    // collinear segments -- normals within LINE_DEG, each within LINE_M of the other's line where they meet (a plate's
+    // skin: LINE_PLATE_M; a riveted web is 3 cm off plumb across Petrinja's deck) -- are one face across a gap: a thin
+    // plate's skin across JOIN_PLATE_M, whatever joins it there (a plate passes through it: a
+    // deck slab and its haunches on a girder's web, 0.4 and 1.1 m on Petrinja's); any face across a hole in the scan of
+    // JOIN_M where nothing joins it (no concave corner at the gap's ends: a slab's soffit does not run on through the
+    // girder it meets, nor a sidewalk's top through the girder to the safety strip). Nearest pairs first.
+    static void merge(std::vector<Seg>& segs, std::vector<std::vector<int>>& runs, const std::vector<STri>& st, const SSet& ref, int& seed) {
+        const double cl = std::cos(LINE_DEG * PI / 180), snap = std::cos(SNAP2_DEG * PI / 180);
+        for (;;) {
+            const int K = (int)segs.size();
+            std::vector<char> plate(K, 0);
+            for (int i = 0; i < K; i++)
+                for (int j = i + 1; j < K; j++)
+                    if (mates(segs[i], segs[j])) plate[i] = plate[j] = 1;
+            const std::vector<Link> links = link_all(segs, st, 0);
+            int bi = -1, bj = -1;
+            double bg = INFINITY;
+            for (int i = 0; i < K; i++)
+                for (int j = 0; j < K; j++) {
+                    if (i == j || dot2(segs[i].n, segs[j].n) < cl) continue;
+                    const Seg &x = segs[i], &y = segs[j];
+                    const double d[2] = {-x.n[1], x.n[0]};
+                    double pe[2], ps[2];
+                    at(x, x.t1, pe), at(y, y.t0, ps);   // x's end, y's start
+                    const double gap = dot2(d, ps) - x.t1;
+                    const bool pl = plate[i] || plate[j];
+                    const double lm = pl ? LINE_PLATE_M : LINE_M;
+                    if (!(gap > 0) || gap > (pl ? JOIN_PLATE_M : JOIN_M) || gap >= bg) continue;
+                    if (std::fabs(dot2(x.n, ps) - x.c) > lm || std::fabs(dot2(y.n, pe) - y.c) > lm) continue;
+                    if (!pl) {   // a hole: nothing meets x's end or y's start at a concave corner
+                        bool joined = false;
+                        for (const Link& l : links)
+                            joined |= !l.convex && ((l.i == i && l.j != j) || (l.j == j && l.i != i));
+                        if (joined) continue;
+                    }
+                    bg = gap, bi = i, bj = j;
+                }
+            if (bi < 0) return;
+            double p0[2], p1[2];
+            at(segs[bi], segs[bi].t0, p0), at(segs[bj], segs[bj].t1, p1);
+            runs[bi].insert(runs[bi].end(), runs[bj].begin(), runs[bj].end());
+            segs[bi] = fit(st, runs[bi], p0, p1, snap, ref);
+            segs.erase(segs.begin() + bj), runs.erase(runs.begin() + bj);
+            if (seed == bj) seed = bi;
+            if (seed > bj) seed--;
+        }
+    }
+
+    // a thin plate standing on another plate's skin -- both its skins end on that skin's line (within LINK_M), square to
+    // it within 45 deg, inside it, the plate on its front -- splits that skin there: a girder's web on its bottom flange's
+    // top (one line either side of the web). Each side is a face of its own, refit of its own triangles. (A railing on an
+    // edge beam's top does not split it: the edge beam is no plate.)
+    static void split_t(std::vector<Seg>& segs, std::vector<std::vector<int>>& runs, const std::vector<STri>& st, const SSet& ref, int& seed) {
+        const double snap = std::cos(SNAP2_DEG * PI / 180), sq = std::sin(45 * PI / 180);
+        const int K0 = (int)segs.size();
+        auto plate = [&](int g) {
+            for (int k = 0; k < (int)segs.size(); k++) if (k != g && mates(segs[g], segs[k])) return true;
+            return false;
+        };
+        for (int a = 0; a < K0; a++)
+            for (int b = a + 1; b < K0; b++) {
+                if (!mates(segs[a], segs[b])) continue;
+                for (int g = 0; g < (int)segs.size(); g++) {
+                    if (g == a || g == b || !plate(g)) continue;
+                    const Seg G = segs[g];
+                    const double dg[2] = {-G.n[1], G.n[0]};
+                    double tg[2];
+                    bool ok = true;
+                    for (int s = 0; s < 2 && ok; s++) {
+                        const Seg& p = segs[s ? b : a];
+                        const double x = cross2(G.n, p.n);
+                        if (std::fabs(x) < sq) { ok = false; break; }
+                        const double X[2] = {(G.c * p.n[1] - p.c * G.n[1]) / x, (G.n[0] * p.c - p.n[0] * G.c) / x};
+                        const double dp[2] = {-p.n[1], p.n[0]}, tp = dot2(dp, X);
+                        double far[2];   // p ends at X; its other end in front of G
+                        if (tp >= p.t1 - OVER_M && tp <= p.t1 + LINK_M) at(p, p.t0, far);
+                        else if (tp >= p.t0 - LINK_M && tp <= p.t0 + OVER_M) at(p, p.t1, far);
+                        else { ok = false; break; }
+                        tg[s] = dot2(dg, X);
+                        ok = dot2(G.n, far) - G.c > LINK_M && tg[s] > G.t0 + OVER_MIN && tg[s] < G.t1 - OVER_MIN;
+                    }
+                    if (!ok) continue;
+                    const double lo = std::min(tg[0], tg[1]), hi = std::max(tg[0], tg[1]);
+                    std::vector<int> r[2];
+                    for (int i : runs[g]) {
+                        const double t = st[i].q[0] * dg[0] + st[i].q[1] * dg[1];
+                        if (t < lo) r[0].push_back(i);
+                        else if (t > hi) r[1].push_back(i);
+                    }
+                    if (r[0].empty() || r[1].empty()) continue;
+                    double p0[2], p1[2], p2[2], p3[2];
+                    at(G, G.t0, p0), at(G, lo, p1), at(G, hi, p2), at(G, G.t1, p3);
+                    const Seg g0 = fit(st, r[0], p0, p1, snap, ref), g1 = fit(st, r[1], p2, p3, snap, ref);
+                    const bool second = seed == g && (g1.seed > g0.seed || (g1.seed == g0.seed && dist_to(g1, 0, 0) < dist_to(g0, 0, 0)));
+                    segs[g] = g0, runs[g] = std::move(r[0]);
+                    segs.push_back(g1), runs.push_back(std::move(r[1]));
+                    if (second) seed = (int)segs.size() - 1;
+                }
+            }
+    }
+
+    // linked faces (neighbours in the section: corners, joints) within SQUARE_DEG of square or of parallel are made
+    // exactly so: from the faces on e1 / e2 (never turned), then the heaviest, outward through the links; the lighter of
+    // two turns about its middle and is refit along its new normal
+    static void regularize(std::vector<Seg>& segs, const std::vector<std::vector<int>>& runs, const std::vector<STri>& st, const SSet& ref) {
+        const int K = (int)segs.size();
+        if (K < 2) return;
+        std::vector<std::vector<int>> nb(K);
+        for (const Link& l : link_all(segs, st, 0)) nb[l.i].push_back(l.j), nb[l.j].push_back(l.i);
+        auto axial = [&](int k) { return std::fabs(segs[k].n[0]) == 1 || std::fabs(segs[k].n[1]) == 1; };
+        std::vector<int> order(K);
+        for (int k = 0; k < K; k++) order[k] = k;
+        std::stable_sort(order.begin(), order.end(), [&](int x, int y) {
+            if (axial(x) != axial(y)) return axial(x);
+            return segs[x].area > segs[y].area;
+        });
+        const double tol = std::sin(SQUARE_DEG * PI / 180), snap = std::cos(SNAP2_DEG * PI / 180);
+        std::vector<char> done(K, 0);
+        std::vector<int> queue;
+        for (int r : order) {
+            if (done[r]) continue;
+            done[r] = 1, queue.assign(1, r);
+            for (size_t qi = 0; qi < queue.size(); qi++) {
+                const int a = queue[qi];
+                for (int x : nb[a]) {
+                    if (done[x] || axial(x)) continue;
+                    const double c = dot2(segs[a].n, segs[x].n), s = cross2(segs[a].n, segs[x].n);
+                    double want[2];
+                    if (std::fabs(c) <= tol) {   // square: a's normal turned by 90 deg toward x's
+                        const double sg = s > 0 ? 1 : -1;
+                        want[0] = -sg * segs[a].n[1], want[1] = sg * segs[a].n[0];
+                    } else if (std::fabs(s) <= tol) {   // parallel, or opposite (a plate's other skin)
+                        const double sg = c > 0 ? 1 : -1;
+                        want[0] = sg * segs[a].n[0], want[1] = sg * segs[a].n[1];
+                    } else
+                        continue;
+                    double p0[2], p1[2];
+                    at(segs[x], segs[x].t0, p0), at(segs[x], segs[x].t1, p1);
+                    segs[x] = fit(st, runs[x], p0, p1, snap, ref, want);
+                    done[x] = 1, queue.push_back(x);
+                }
+            }
+        }
     }
 
     static double dist_to(const Seg& g, double u, double v) {   // a 2D point's distance to segment g
@@ -1247,8 +1527,9 @@ class Faces {
         return std::hypot(u - q[0], v - q[1]);
     }
 
-    // 5. every link i's end -> j's start
-    static std::vector<Link> link_all(const std::vector<Seg>& segs, const std::vector<STri>& st) {
+    // 5. every link i's end -> j's start (ns > 0, the stations, each `station` long: a plate's tip only where nothing is
+    // just beyond it; 0: every one)
+    static std::vector<Link> link_all(const std::vector<Seg>& segs, const std::vector<STri>& st, int ns, double station = 0) {
         std::vector<Link> links;
         const double par = std::sin(PARALLEL_DEG * PI / 180);
         const int K = (int)segs.size();
@@ -1280,7 +1561,7 @@ class Faces {
                     line_at(si, m, tm, l.p), line_at(sj, m, tm, l.q);
                     l.joint = true, l.gap = std::hypot(J[0], J[1]);
                     const double Jn[2] = {l.q[0] - l.p[0], l.q[1] - l.p[1]}, jl = std::hypot(Jn[0], Jn[1]);
-                    if (!same && !free_tip(st, l.p, l.q, 0.1 * std::min(si.area, sj.area))) continue;
+                    if (ns && !same && !free_tip(st, l.p, l.q, ns, station)) continue;
                     // convex: around a plate's tip, or a bend outward; a step (one corner concave) is concave; straight on: convex
                     l.convex = (dot2(si.n, Jn) < 0 && dot2(sj.n, Jn) > 0) || (same && std::fabs(dot2(si.n, Jn)) <= par * jl);
                 }
@@ -1289,19 +1570,24 @@ class Faces {
         return links;
     }
 
-    // a plate's tip p -> q (the material on the left) is free: under `area` of section surface just beyond it. (Both skins
-    // of a girder's web end where its bottom flange starts, of a cross-beam's where the haunches start: not a tip.)
-    static bool free_tip(const std::vector<STri>& st, const double* p, const double* q, double area) {
+    // a plate's tip p -> q (the material on the left) is free: nothing just beyond it (TIP_IN_M to TIP_OUT_M out, as wide
+    // as the tip and TIP_SIDE_M each side) at PERSIST of the ns stations (STATION long; at a station: section surface a
+    // quarter as wide as that box). Both skins of a girder's web end where its bottom flange starts, of a cross-beam's where
+    // the haunches start: at every station, not a tip; the cross-beams' ends beyond a girder's flange tip every 2.8 m are
+    // not the prism's.
+    static bool free_tip(const std::vector<STri>& st, const double* p, const double* q, int ns, double station) {
         double J[2] = {q[0] - p[0], q[1] - p[1]};
         const double half = std::hypot(J[0], J[1]) / 2 + TIP_SIDE_M, mid[2] = {(p[0] + q[0]) / 2, (p[1] + q[1]) / 2};
-        if (!normalize(J, 2)) return false;
+        if (!normalize(J, 2) || ns < 1) return false;
         const double o[2] = {J[1], -J[0]};   // outward: the right of p -> q
-        double got = 0;
+        std::vector<double> per(ns, 0.0);
         for (const STri& x : st) {
             const double w[2] = {x.q[0] - mid[0], x.q[1] - mid[1]}, along = dot2(w, o);
-            if (along >= TIP_IN_M && along <= TIP_OUT_M && std::fabs(dot2(w, J)) <= half) got += x.a;
+            if (along >= TIP_IN_M && along <= TIP_OUT_M && std::fabs(dot2(w, J)) <= half) per[std::min(ns - 1, (x.k0 + x.k1) / 2)] += x.a;
         }
-        return got < area;
+        int blocked = 0;
+        for (double a : per) blocked += a >= 0.25 * 2 * half * station;
+        return blocked < PERSIST * ns;
     }
 
     static void line_at(const Seg& g, const double* m, double tm, double* o) {   // where g's line meets m . x = tm
@@ -1312,84 +1598,183 @@ class Faces {
         o[0] = q[0] + t * d[0], o[1] = q[1] + t * d[1];
     }
 
-    // the auto chain from the seed: segments in walking order (a trailing -1: it closed into a cycle)
-    static std::vector<int> grow(const std::vector<Seg>& segs, const std::vector<Link>& links, int seed, const Tune& tu) {
+    // the auto chain from the seed: segments in walking order (a trailing -1: it closed into a cycle). A step at each end
+    // in turn, through the closest link (a segment under SHORT_M at a SHORT_PEN handicap: a corner's 18 cm bevel that the
+    // next face overlaps would end the chain there) to a segment ending within element_m of the seed segment (not of the
+    // click: one near a wide face's edge would reach further), never a ragged one, never so that the profile touches
+    // itself (an edge beam's inner face run on up a railing post's base). A convex corner always; a concave one:
+    //   - between two thin plates' skins: a steel section's own corner (a girder's web and its flange);
+    //   - into the other skin of a plate already in the chain;
+    //   - from a plate's skin round the plate's end: the concave corner, then only convex ones, back to a skin of the same
+    //     plate, WRAP_STEPS at most (a flange whose underside the scan drew as a fillet from its tip to the web);
+    //   - into a plate's skin when the chain's other end meets the plate's other skin at a concave corner: the flange
+    //     round the plate's end, clicked (a top flange whose undersides are both fillets);
+    //   - between two faces that are not plates' into one shorter than concave_max_m, which ends that side: past it lies
+    //     another element (a road's curb, an edge beam's inner face);
+    //   - else not: a slab, a haunch, a soffit joining a girder are not the girder's; nor is a girder the soffit's.
+    // A side that cannot go on now is tried again after the other grows (a plate's other skin may be in the chain then).
+    static std::vector<int> grow(const std::vector<Seg>& segs, const std::vector<Link>& links, const std::vector<std::vector<int>>& mate,
+                                 int seed, const Tune& tu) {
+        const int K = (int)segs.size();
         std::vector<int> chain{seed};
-        std::vector<char> in(segs.size(), 0);
+        std::vector<const Link*> used;   // used[k]: chain[k] -> chain[k + 1]; closed: the last is chain.back() -> chain[0]
+        std::vector<char> in(K, 0), busy(K, 0);
         in[seed] = 1;
-        // within element_m of the seed segment (not of the click: then a click near a wide face's edge would reach further)
-        auto near_ok = [&](const Seg& g, double t) { double q[2]; at(g, t, q); return dist_to(segs[seed], q[0], q[1]) <= tu.element_m; };
-        auto ok = [&](const Link& l, int k) {   // convex, or concave into a short segment; never into a ragged one
-            const double len = segs[k].t1 - segs[k].t0;
-            return (l.convex || len < tu.concave_max_m) && segs[k].rms <= std::max(RMS_M, RMS_FRAC * len);
+        auto len = [&](int k) { return segs[k].t1 - segs[k].t0; };
+        auto ragged = [&](int k) { return segs[k].rms > std::max(RMS_M, RMS_FRAC * len(k)); };
+        auto plate = [&](int k) { return !mate[k].empty(); };
+        auto mate_of = [&](int a, int k) { return std::find(mate[a].begin(), mate[a].end(), k) != mate[a].end(); };
+        auto mate_in = [&](int k) {
+            for (int m : mate[k]) if (in[m]) return true;
+            return false;
         };
-        // the closest link wins, a segment under SHORT_M at a handicap (a corner's 18 cm bevel that the next face overlaps
-        // would end the chain there); a short concave face ends the chain on its side: past it lies another element; and
-        // the profile never touches itself (an edge beam's inner face run on up a railing post's base, past its top's corner)
-        auto rank = [&](const Link& l, int k) { return l.gap + (segs[k].t1 - segs[k].t0 < SHORT_M ? SHORT_PEN : 0); };
-        std::vector<const Link*> used;   // used[k]: chain[k] -> chain[k + 1]
-        bool fwd = true, bwd = true;     // a step at each end in turn: the faces nearest the click first
-        while (fwd || bwd) {
-            if (fwd) {   // forward from the chain's end, to a segment ending within element_m (or closing it)
-                const Link* b = nullptr;
-                for (const Link& l : links)
-                    if (l.i == chain.back() && (l.j == chain.front() || (!in[l.j] && near_ok(segs[l.j], segs[l.j].t1))) &&
-                        (!b || rank(l, l.j) < rank(*b, b->j)))
-                        b = &l;
-                fwd = b && ok(*b, b->j);
-                if (fwd) {
-                    const bool closes = b->j == chain.front();
-                    std::vector<int> c2 = chain;
-                    std::vector<const Link*> u2 = used;
-                    if (!closes) c2.push_back(b->j);
-                    u2.push_back(b);
-                    fwd = !touches(segs, c2, u2, closes);
-                    if (fwd && closes) { chain.push_back(-1); return chain; }
-                    if (fwd) chain = c2, used = u2, in[b->j] = 1, fwd = b->convex;
-                }
+        auto near_ok = [&](int k, bool fwd) {
+            double q[2];
+            at(segs[k], fwd ? segs[k].t1 : segs[k].t0, q);
+            return dist_to(segs[seed], q[0], q[1]) <= tu.element_m;
+        };
+        auto rank = [&](const Link& l, int k) { return l.gap + (len(k) < SHORT_M ? SHORT_PEN : 0); };
+        // the closest link out of k's end (fwd) or into k's start, to a free segment (not in the chain nor busy, not
+        // ragged, its far end within element_m) or to `close`
+        auto best = [&](int k, bool fwd, int close) -> const Link* {
+            const Link* b = nullptr;
+            for (const Link& l : links) {
+                if ((fwd ? l.i : l.j) != k) continue;
+                const int o = fwd ? l.j : l.i;
+                if (o != close && (in[o] || busy[o] || ragged(o) || !near_ok(o, fwd))) continue;
+                if (!b || rank(l, o) < rank(*b, fwd ? b->j : b->i)) b = &l;
             }
-            if (bwd) {   // backward from its start
-                const Link* b = nullptr;
-                for (const Link& l : links)
-                    if (l.j == chain.front() && !in[l.i] && near_ok(segs[l.i], segs[l.i].t0) && (!b || rank(l, l.i) < rank(*b, b->i))) b = &l;
-                bwd = b && ok(*b, b->i);
-                if (bwd) {
-                    std::vector<int> c2 = chain;
-                    std::vector<const Link*> u2 = used;
-                    c2.insert(c2.begin(), b->i), u2.insert(u2.begin(), b);
-                    bwd = !touches(segs, c2, u2, false);
-                    if (bwd) chain = c2, used = u2, in[b->i] = 1, bwd = b->convex;
+            return b;
+        };
+        bool closed = false;
+        // whether link l from k (fwd: out of its end; else into its start) may be taken: 1 yes, 2 yes and that side ends
+        // (a short concave face), 0 no; path / lk: the segments it adds and their links (a wrap adds several)
+        auto decide = [&](const Link* l, int k, bool fwd, int close, std::vector<int>& path, std::vector<const Link*>& lk) -> int {
+            std::fill(busy.begin(), busy.end(), 0);
+            path.assign(1, fwd ? l->j : l->i), lk.assign(1, l);
+            const int o = path[0];
+#ifdef FACES_DEBUG
+            fprintf(stderr, "  step %s from %d: %d (%s, gap %.3f) plate %d %d mate_in %d\n", fwd ? "fwd" : "bwd", k, o,
+                    l->convex ? "convex" : "concave", l->gap, (int)plate(k), (int)plate(o), (int)mate_in(o));
+#endif
+            if (o == close) return l->convex || plate(k) || plate(o) || len(o) < tu.concave_max_m;   // closing the loop
+            if (l->convex || (plate(k) && plate(o)) || mate_in(o)) return 1;
+            if (plate(o) && chain.size() > 1) {   // the chain's other end meets the plate's other skin: a flange seen from it
+                const int e = fwd ? chain.front() : chain.back();
+                for (const Link& m : links)
+                    if (!m.convex && (fwd ? m.j == e && mate_of(o, m.i) : m.i == e && mate_of(o, m.j))) return 1;
+            }
+            if (plate(k)) {   // round the plate's end
+                busy[o] = 1;
+                for (int s = 0; s < WRAP_STEPS; s++) {
+                    const Link* b = best(path.back(), fwd, close);
+#ifdef FACES_DEBUG
+                    if (b) fprintf(stderr, "    wrap %d -> %d (%s)\n", path.back(), fwd ? b->j : b->i, b->convex ? "convex" : "concave");
+                    else fprintf(stderr, "    wrap %d -> none\n", path.back());
+#endif
+                    if (!b) return 0;
+                    const int x = fwd ? b->j : b->i;
+                    path.push_back(x), lk.push_back(b);
+                    if (mate_of(k, x)) return 1;
+                    if (!b->convex || x == close) return 0;
+                    busy[x] = 1;
                 }
+                return 0;
+            }
+            return !plate(o) && len(o) < tu.concave_max_m ? 2 : 0;
+        };
+        // one step at the end (fwd) or the start: 1 grew, 2 grew and that side ends, 0 not now, -1 that side ends. The
+        // closest link; when the element may not go on through it, one within ALT_M of it that goes on (a fillet's end
+        // meets a girder's haunch 4 cm before its web)
+        auto step = [&](bool fwd) -> int {
+            const int k = fwd ? chain.back() : chain.front(), close = chain.size() > 1 ? (fwd ? chain.front() : chain.back()) : -1;
+            std::fill(busy.begin(), busy.end(), 0);
+            std::vector<std::pair<double, const Link*>> cand;
+            for (const Link& l : links) {
+                if ((fwd ? l.i : l.j) != k) continue;
+                const int o = fwd ? l.j : l.i;
+                if (o != close && (in[o] || ragged(o) || !near_ok(o, fwd))) continue;
+                cand.push_back({rank(l, o), &l});
+            }
+            if (cand.empty()) return -1;
+            std::stable_sort(cand.begin(), cand.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+            std::vector<int> path;
+            std::vector<const Link*> lk;
+            int res = 0;
+            for (size_t c = 0; c < cand.size() && cand[c].first <= cand[0].first + ALT_M && !res; c++) {
+                res = decide(cand[c].second, k, fwd, close, path, lk);
+                if (res == 2 && c > 0) res = 0;
+            }
+            if (!res) return 0;
+            std::vector<int> c2 = chain;   // the chain with the path: appended (fwd) or prepended
+            std::vector<const Link*> u2 = used;
+            bool closes = false;
+            for (size_t i = 0; i < path.size() && !closes; i++) {
+                if (path[i] == close) closes = true;
+                if (fwd) {
+                    if (!closes) c2.push_back(path[i]);
+                    u2.push_back(lk[i]);
+                } else if (closes)
+                    u2.push_back(lk[i]);   // chain.back() -> c2[0]: the closing link, last
+                else
+                    c2.insert(c2.begin(), path[i]), u2.insert(u2.begin(), lk[i]);
+            }
+            if (touches(segs, c2, u2, closes, mate)) return -1;
+            chain = std::move(c2), used = std::move(u2), closed = closes;
+            for (int x : chain) in[x] = 1;
+            return res;
+        };
+        int state[2] = {1, 1};   // forward, backward: 1 open, 0 not now, -1 ended
+        for (bool grew = true; grew && !closed;) {
+            grew = false;
+            for (int side = 0; side < 2 && !closed; side++) {
+                if (state[side] < 0) continue;
+                const int r = step(side == 0);
+#ifdef FACES_DEBUG
+                fprintf(stderr, "grow %s -> %d, chain:", side ? "bwd" : "fwd", r);
+                for (int x : chain) fprintf(stderr, " %d", x);
+                fprintf(stderr, "\n");
+#endif
+                if (r >= 1) grew = true, state[side] = r == 2 ? -1 : 1;
+                else state[side] = r;
             }
         }
+        if (closed) chain.push_back(-1);
         return chain;
     }
 
-    // the chain's profile (closed: its last link back to the first segment) comes within SELF_M of itself
-    static bool touches(const std::vector<Seg>& segs, const std::vector<int>& chain, const std::vector<const Link*>& used, bool closed) {
+    // the chain's profile (closed: its last link back to the first segment) comes within SELF_M of itself (a plate's two
+    // skins may, unless they cross)
+    static bool touches(const std::vector<Seg>& segs, const std::vector<int>& chain, const std::vector<const Link*>& used, bool closed,
+                        const std::vector<std::vector<int>>& mate) {
         std::vector<std::array<double, 2>> pts;
+        std::vector<int> eseg;   // per edge pts[e] -> pts[e + 1]: its segment (-1: a joint)
         double q[2];
         if (closed) pts.push_back({used.back()->q[0], used.back()->q[1]});
         else at(segs[chain[0]], segs[chain[0]].t0, q), pts.push_back({q[0], q[1]});
         for (size_t k = 0; k < used.size(); k++) {
             const Link* l = used[k];
             if (closed && k + 1 == used.size()) {   // the closing link: its corner is the first point (a joint: its start too)
-                if (l->joint) pts.push_back({l->p[0], l->p[1]});
+                if (l->joint) pts.push_back({l->p[0], l->p[1]}), eseg.push_back(chain[k]), eseg.push_back(-1);
+                else eseg.push_back(chain[k]);
                 break;
             }
-            pts.push_back({l->p[0], l->p[1]});
-            if (l->joint) pts.push_back({l->q[0], l->q[1]});
+            pts.push_back({l->p[0], l->p[1]}), eseg.push_back(chain[k]);
+            if (l->joint) pts.push_back({l->q[0], l->q[1]}), eseg.push_back(-1);
         }
-        if (!closed) at(segs[chain.back()], segs[chain.back()].t1, q), pts.push_back({q[0], q[1]});
+        if (!closed) at(segs[chain.back()], segs[chain.back()].t1, q), pts.push_back({q[0], q[1]}), eseg.push_back(chain.back());
+        auto mated = [&](int a, int b) { return a >= 0 && b >= 0 && std::find(mate[a].begin(), mate[a].end(), b) != mate[a].end(); };
         const size_t n = pts.size(), ne = closed ? n : n - 1;
         for (size_t i = 0; i < ne; i++)
             for (size_t j = i + 2; j < ne; j++) {
                 if (closed && i == 0 && j == ne - 1) continue;   // adjacent across the closure
                 double cp[2], cq[2];
-                if (contact(pts[i].data(), pts[(i + 1) % n].data(), pts[j].data(), pts[(j + 1) % n].data(), cp, cq) >= SELF_M) continue;
-                // an open chain's two loose ends meeting is a loop about to close, not a touch
-                if (!closed && i == 0 && j == ne - 1 && std::hypot(cp[0] - pts[0][0], cp[1] - pts[0][1]) < LOOSE_M &&
-                    std::hypot(cq[0] - pts[n - 1][0], cq[1] - pts[n - 1][1]) < LOOSE_M)
+                const double dd = contact(pts[i].data(), pts[(i + 1) % n].data(), pts[j].data(), pts[(j + 1) % n].data(), cp, cq);
+                if (dd >= SELF_M || (dd > 0 && mated(eseg[i], eseg[j]))) continue;
+                // within LOOSE_M of an open chain's loose end is not a touch: that end is where the scan stopped, its next
+                // corner trims it (a fillet's end run 1 cm into the web it meets; the two loose ends of a loop about to close)
+                if (!closed && ((i == 0 && std::hypot(cp[0] - pts[0][0], cp[1] - pts[0][1]) < LOOSE_M) ||
+                                (j == ne - 1 && std::hypot(cq[0] - pts[n - 1][0], cq[1] - pts[n - 1][1]) < LOOSE_M)))
                     continue;
                 return true;
             }

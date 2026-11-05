@@ -208,6 +208,20 @@ def test_a_a_click_on_a_web_gives_the_same_girder(slab):
     assert sorted(round(f["width"], 1) for f in faces) == [0.5, 0.8, 0.8]
 
 
+def test_a_the_click_is_where_the_view_ray_hits(slab):
+    """The viewer's point comes from the LOD tile it shows, up to ~1 % of the distance off the bake mesh (7-12 cm at 7 m).
+    A point 8 cm past the left girder's outer web along the view ray, 4 cm above its bottom edge -- inside the girder,
+    nearer its bottom face than its web --: the ray hits the web, so the web is the seed and the origin is on it."""
+    d = np.array((0, 1, 0.15)) / np.linalg.norm((0, 1, 0.15))
+    for x in (4, 10, 16):
+        hit = np.array((x, -2.25, -0.76))
+        r = check(slab.element(hit + 0.08 * d, d))
+        seed = next(g for g in r["segments"] if g["seed"])
+        e1, e2 = np.array(r["e1"]), np.array(r["e2"])
+        assert np.allclose(slab.R.T @ (seed["n"][0] * e1 + seed["n"][1] * e2), (0, -1, 0), atol=0.02)   # the web
+        assert np.allclose(slab.local(r["origin"]), hit, atol=0.01)                                   # on it
+
+
 # ---------------------------------------------------------------- (b) the soffit between the girders
 def test_b_the_soffit_between_the_girders_is_its_bay(slab):
     for p, d in (SOFFIT, ((14, -1.2, 0.0), (0.3, 0.2, 1))):   # an oblique view too
