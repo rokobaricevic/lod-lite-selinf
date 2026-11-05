@@ -175,7 +175,8 @@ def check(r):
         for k, (uv, s) in enumerate(((p, r["s0"]), (q, r["s0"]), (p, r["s1"]), (q, r["s1"]))):
             assert np.allclose(P[k], o + uv[0] * e1 + uv[1] * e2 + s * a, atol=2e-3)
         assert f["width"] == pytest.approx(np.linalg.norm(q - p), abs=2e-3) and f["length"] == pytest.approx(r["s1"] - r["s0"], abs=2e-3)
-        assert f["area"] == pytest.approx(f["width"] * f["length"], rel=1e-3, abs=1e-3) and 0 <= f["coverage"] <= 1
+        assert f["area"] == pytest.approx(f["width"] * f["length"], rel=1e-3, abs=max(1e-3, 6e-4 * f["length"]))   # widths are to the mm
+        assert 0 <= f["coverage"] <= 1
         if f["seg"] is not None:
             assert f["key"] == f"s{f['seg']}" and np.allclose(n, segs[f["seg"]]["n"][0] * e1 + segs[f["seg"]]["n"][1] * e2, atol=1e-9)
     return r
@@ -220,6 +221,95 @@ def test_a_the_click_is_where_the_view_ray_hits(slab):
         e1, e2 = np.array(r["e1"]), np.array(r["e2"])
         assert np.allclose(slab.R.T @ (seed["n"][0] * e1 + seed["n"][1] * e2), (0, -1, 0), atol=0.02)   # the web
         assert np.allclose(slab.local(r["origin"]), hit, atol=0.01)                                   # on it
+
+
+WEB = 0.02   # half a steel web's thickness: its two skins 4 cm apart
+
+
+def igirder(rng):
+    """A riveted steel I-girder along x (0..20) as Petrinja's: web skins at y = -+WEB from z -0.45 to 1.64, flanges 0.5 x
+    0.06. A deck slab 0.9 m thick joins its inner skin (y > 0) from z -0.1 to 0.8; a sidewalk slab its outer skin from 0.6
+    to 0.95: the scan sees each skin in two parts, 0.9 and 0.35 m apart. rect's normal is along a x b."""
+    q = lambda p0, a, b, step=None: quad(rng, p0, a, b, step)  # noqa: E731
+    X, Y, Z = (20, 0, 0), (lambda w: (0, w, 0)), (lambda h: (0, 0, h))
+    return join(q((0, -0.25, 1.70), X, Y(0.5)),                                      # the top flange: top, undersides, tips
+                q((0, -0.25, 1.64), Y(0.25 - WEB), X), q((0, WEB, 1.64), Y(0.25 - WEB), X),
+                q((0, -0.25, 1.64), X, Z(0.06), 0.04), q((0, 0.25, 1.64), Z(0.06), X, 0.04),
+                q((0, -WEB, 0.95), X, Z(0.69)), q((0, -WEB, -0.45), X, Z(1.05)),      # the web's outer skin, the sidewalk's slab
+                q((0, WEB, 0.8), Z(0.84), X), q((0, WEB, -0.45), Z(0.35), X),         # its inner skin, the deck between
+                q((0, -0.25, -0.45), X, Y(0.25 - WEB)), q((0, WEB, -0.45), X, Y(0.25 - WEB)),   # the bottom flange: tops,
+                q((0, -0.25, -0.51), Y(0.5), X),                                     # bottom, tips
+                q((0, -0.25, -0.51), X, Z(0.06), 0.04), q((0, 0.25, -0.51), Z(0.06), X, 0.04),
+                q((0, WEB, 0.8), X, Y(3 - WEB)), q((0, WEB, -0.1), Y(3 - WEB), X), q((0, 3, -0.1), Z(0.9), X),   # the deck
+                q((0, -2, 0.95), X, Y(2 - WEB)), q((0, -2, 0.6), Y(2 - WEB), X), q((0, -2, 0.6), X, Z(0.35), 0.05),   # sidewalk
+                q((-5, -6, -3), (30, 0, 0), (0, 12, 0)))                             # the ground
+
+
+def test_a_an_i_girder_is_one_closed_i_from_anywhere_on_it():
+    """Thin plates: a web's two skins 4 cm apart and a flange's are each one plate; the chain turns the I's concave
+    corners (web to flange) and the collinear parts of a skin are one face across the slab joining it (0.9 and 0.35 m).
+    Any click on the girder -- either skin above and below the slabs, the bottom -- gives the same closed I of 12 faces;
+    a click on the deck or on the sidewalk gives that slab, not the girder."""
+    rng = np.random.default_rng(5)
+    scene = Scene(*scanned(rng, *igirder(rng), R=rot_z(23.5)), rot_z(23.5))
+    want = [0.06] * 4 + [0.235] * 4 + [0.51] * 2 + [2.09] * 2   # tips, flanges' tops and undersides, top and bottom, webs
+    for p, d in (((10, -WEB, 1.2), (0, 1, 0)), ((6, -WEB, 0.0), (0, 1, 0.1)), ((12, WEB, 1.2), (0, -1, 0)),
+                 ((8, WEB, -0.25), (0, -1, 0.1)), ((14, WEB, -0.35), (0.2, -1, 0.1)), ((9, -0.1, -0.51), (0, 0, 1))):
+        r = check(scene.element(p, d))
+        assert angle(scene.R.T @ r["axis"], (1, 0, 0)) < 0.5 and len(r["pieces"]) == 1 and r["pieces"][0]["closed"], p
+        assert np.allclose(sorted(f["width"] for f in side_faces(r)), want, atol=0.02), (p, sorted(f["width"] for f in side_faces(r)))
+        assert r["s1"] - r["s0"] == pytest.approx(20, abs=0.3)
+        o, e1, e2 = (np.array(r[k]) for k in ("origin", "e1", "e2"))
+        corners = np.array([scene.local(o + u * e1 + v * e2)[1:] for u, v in r["pieces"][0]["uv"]])
+        assert np.all(np.abs(corners[:, 0]) < 0.26) and corners[:, 1].min() == pytest.approx(-0.51, abs=0.01)
+        assert corners[:, 1].max() == pytest.approx(1.70, abs=0.01)
+    for p, y in (((10, 1.5, -0.1), (0.0, 3.01)), ((10, -1, 0.95), (-2.01, 0.0))):   # the deck's soffit, the sidewalk
+        r = check(scene.element(p, (0, 0, 1 if p[2] < 0 else -1)))
+        o, e1, e2 = (np.array(r[k]) for k in ("origin", "e1", "e2"))
+        ys = [scene.local(o + u * e1 + v * e2)[1] for u, v in r["pieces"][0]["uv"]]
+        assert y[0] <= min(ys) and max(ys) <= y[1] and len(side_faces(r)) == 3, (p, ys)   # its 3 faces, none the girder's
+
+
+def test_a_a_face_across_a_hole_in_the_scan_is_one():
+    """A beam's side with a strip 0.45 m tall missing along its whole length, where nothing joins it: one face, as tall as
+    the side (JOIN_M). (A strip where something joins it is two: the soffit either side of a girder, test b.)"""
+    rng = np.random.default_rng(6)
+    side = join(quad(rng, (0, 0, 0), (20, 0, 0), (0, 0, 0.3)), quad(rng, (0, 0, 0.75), (20, 0, 0), (0, 0, 0.3)))   # -y, the hole
+    V, F = join(side, box(rng, (0, 0, 0), (20, 0.6, 1.05), skip=("y-", "x-", "x+")), quad(rng, (-5, -5, -2), (30, 0, 0), (0, 10, 0)))
+    scene = Scene(*scanned(rng, V, F, holes=0.02), np.eye(3))
+    r = check(scene.element((10, 0, 0.15), (0, 1, 0)))
+    side = next(f for f in side_faces(r) if np.allclose(f["normal"], (0, -1, 0), atol=1e-3))
+    assert side["width"] == pytest.approx(1.05, abs=0.02) and len(side_faces(r)) == 4 and r["pieces"][0]["closed"]
+
+
+def test_a_neighbouring_faces_are_made_exactly_square():
+    """A box beam 0.6 x 0.4 turned 20 deg about its axis, +-5 mm noise: no face is on e1 / e2, and their normals, fitted
+    each on its own off square by tenths of a degree, are made exactly square (linked faces within SQUARE_DEG)."""
+    rng = np.random.default_rng(7)
+    tilt = np.array([[1, 0, 0], [0, np.cos(0.35), -np.sin(0.35)], [0, np.sin(0.35), np.cos(0.35)]])
+    V, F = box(rng, (0, -0.3, -0.2), (20, 0.3, 0.2), skip=("x-", "x+"))
+    V, F = join(((V @ tilt.T) + (0, 0, 1.5), F), quad(rng, (-5, -5, 0), (30, 0, 0), (0, 10, 0)))
+    scene = Scene(*scanned(rng, V, F, holes=0.03), np.eye(3))
+    r = check(scene.element((10, *(tilt @ (0, 0, -0.2) + (0, 0, 1.5))[1:]), tilt @ (0, 0, 1.0)))
+    assert len(r["pieces"]) == 1 and r["pieces"][0]["closed"] and len(side_faces(r)) == 4
+    n = [np.array(r["segments"][k]["n"]) for k in r["pieces"][0]["keys"]]   # unrounded (the corners are to the mm)
+    for k in range(4):
+        assert abs(n[k] @ n[k - 1]) < 1e-9 and min(abs(n[k][0]), abs(n[k][1])) > 0.3   # square; 20 deg off e1 / e2
+
+
+def test_f_the_same_element_either_side_of_an_occlusion():
+    """A girder hidden for 3 m in the middle of its 20 m (behind something in front of it): its extent crosses the gap
+    (gap_m 4), so a click either side gives the same element, end to end."""
+    rng = np.random.default_rng(8)
+    V, F = join(box(rng, (0, -0.25, -0.8), (20, 0.25, 0), skip=("x-", "x+")), quad(rng, (-5, -5, -3), (30, 0, 0), (0, 10, 0)))
+    V, F = scanned(rng, V, F, holes=0.03)
+    cen = (V[F[:, 0]] + V[F[:, 1]] + V[F[:, 2]]) / 3 - FAR
+    F = F[~((cen[:, 0] > 8.5) & (cen[:, 0] < 11.5) & (cen[:, 2] > -1))]   # 3 m of it unseen
+    scene = Scene(V, F, np.eye(3))
+    a, b = (check(scene.element((x, -0.25, -0.4), (0, 1, 0))) for x in (4, 16))
+    for r, x in ((a, 4), (b, 16)):
+        assert r["s0"] + x == pytest.approx(0, abs=0.3) and r["s1"] + x == pytest.approx(20, abs=0.3)
+    assert profile(a)[0] == pytest.approx(profile(b)[0], abs=0.02)
 
 
 # ---------------------------------------------------------------- (b) the soffit between the girders

@@ -157,7 +157,7 @@ static constexpr int NB = 8, BINS = 6 * NB * NB, MAX_PEAKS = 8, MAX_DIRS = 64;
 
 struct NotFound : std::runtime_error { using std::runtime_error::runtime_error; };   // -> LookupError
 
-struct Tune { double window_m = 6, slab_m = 1.5, angle_deg = 15, concave_max_m = 0, element_m = 2.5, presence = 0.35, gap_m = 2.0; };
+struct Tune { double window_m = 6, slab_m = 1.5, angle_deg = 15, concave_max_m = 0, element_m = 2.5, presence = 0.35, gap_m = 4.0; };
 
 template <class A, class B> static inline double dot(const A* a, const B* b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
 static inline double dot2(const double* a, const double* b) { return a[0] * b[0] + a[1] * b[1]; }
@@ -2197,5 +2197,5 @@ PYBIND11_MODULE(faces_core, m) {
         }, py::arg("point"), py::arg("dir"), py::arg("axis") = py::none(), py::arg("on") = std::vector<int64_t>(),
            py::arg("off") = std::vector<int64_t>(), py::arg("add") = py::tuple(), py::arg("s0") = py::none(), py::arg("s1") = py::none(),
            py::arg("window_m") = 6.0, py::arg("slab_m") = 1.5, py::arg("angle_deg") = 15.0, py::arg("concave_max_m") = 0.0,
-           py::arg("element_m") = 2.5, py::arg("presence") = 0.35, py::arg("gap_m") = 2.0);
+           py::arg("element_m") = 2.5, py::arg("presence") = 0.35, py::arg("gap_m") = 4.0);
 }
