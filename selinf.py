@@ -8,9 +8,10 @@ POST /click {"origin": [x,y,z], "direction": [x,y,z]} (a camera ray, bake frame)
   n bytes of JSON header, then each layer's float32 xyz; an error -> 500, the same form with {"error": ...}. A find is
   saved (FoundStore, out/found/) and the header gains "found": its item and "replaced": [the ids it replaced].
 POST /found/delete {"id": "p7"} -> {"ok": true, "id": "p7"}; an unknown id -> 404 {"error": ...}.
-POST /faces {"center": [3], "axes": [3 rows of 3], "half": [3]} (bake frame; optional angle_deg, gap_m, cell_m,
-  min_area_m2; text/plain: no CORS preflight) -> faces_core's answer (faces.cpp: the flat faces of the mesh in that box);
-  a bad request -> 400, no faces_core -> 503, the same form with {"error": ...}.
+POST /element {"point": [3], "dir": [3]} (a click and its unit view ray, bake frame; optional axis, on, off, add, s0, s1
+  and the tuning keys, ELEMENT_KEYS; text/plain: no CORS preflight) -> faces_core's answer, JSON (faces.cpp: the element
+  there as a prism, one cross-section swept along an axis, with its candidate faces); a bad request -> 400, no element
+  there -> 422, no faces_core -> 503, each {"error": ...}.
 SELINF_AUTH=user:pass: every request needs that HTTP Basic login (./test.sh starts the server so).
 SELINF_REPO: the lynceus checkout whose pipeline code, worker venv and job data this reads; it never writes there.
 """
@@ -336,13 +337,15 @@ def framed(head):   # an answer that is only a header (an error): uint32 LE n, t
     return len(text).to_bytes(4, "little") + text
 
 
-FACES_OPTS = ("angle_deg", "gap_m", "cell_m", "min_area_m2")   # POST /faces's optional keys = split's tuning
+# POST /element's keys = Faces.element's arguments: the click, then the owner's choices and the tuning
+ELEMENT_KEYS = ("point", "dir", "axis", "on", "off", "add", "s0", "s1", "window_m", "slab_m", "angle_deg", "concave_max_m",
+                "element_m", "presence", "gap_m")
 
 
 def server(core, infer, classes, root, port=8765, auth=None, found=None, faces=None):
     """The viewer (root's viewer.html, selinf.js and out/) and the clicks, on 127.0.0.1:port. With auth ("user:pass")
     every request needs that HTTP Basic login: the public address forwards here. found: a FoundStore that keeps the
-    finds (None: nothing is saved). faces: a faces_core.Faces of the mesh for POST /faces (None: it answers 503)."""
+    finds (None: nothing is saved). faces: a faces_core.Faces of the mesh for POST /element (None: it answers 503)."""
     lock = threading.Lock()
     login = auth and ("Basic " + base64.b64encode(auth.encode()).decode()).encode()
 
@@ -398,8 +401,8 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None, faces=N
             route = urlsplit(self.path).path
             if route == "/found/delete":
                 return self.delete()
-            if route == "/faces":
-                return self.faces()
+            if route == "/element":
+                return self.element()
             if route != "/click":
                 return self.send_error(404)
             try:
@@ -412,21 +415,24 @@ def server(core, infer, classes, root, port=8765, auth=None, found=None, faces=N
                 body, code = framed({"error": repr(exc)}), 500
             self.reply(code, body, "application/octet-stream")
 
-        def faces(self):   # POST /faces {"center", "axes", "half", FACES_OPTS...} (text/plain: no CORS preflight)
+        def element(self):   # POST /element {"point", "dir", ELEMENT_KEYS...} (text/plain: no CORS preflight)
             if faces is None:
-                return self.reply(503, framed({"error": "this server has no element faces (faces_core did not load)"}),
-                                  "application/octet-stream")
-            try:   # no lock: split only reads the mesh, takes ~50 ms and releases the GIL
+                return self.reply(503, json.dumps({"error": "this server has no element faces (faces_core did not load)"}).encode())
+            try:   # the body: a JSON object with the click and only Faces.element's keyword arguments
                 req = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                if not isinstance(req, dict) or set(req) - {"center", "axes", "half", *FACES_OPTS}:
-                    raise ValueError(f'expected {{"center", "axes", "half"}}, optionally {", ".join(FACES_OPTS)}')
-                body, code = faces.split(req["center"], req["axes"], req["half"],
-                                         **{k: float(req[k]) for k in FACES_OPTS if k in req}), 200
-            except (ValueError, TypeError, KeyError) as exc:   # not JSON, a key missing, a box split refuses
-                body, code = framed({"error": repr(exc)}), 400
+                if not isinstance(req, dict) or not {"point", "dir"} <= set(req) or set(req) - set(ELEMENT_KEYS):
+                    raise ValueError(f'expected {{"point", "dir"}}, optionally {", ".join(ELEMENT_KEYS[2:])}')
+            except (ValueError, TypeError) as exc:   # not JSON (nor UTF-8), no Content-Length, a key missing or unknown
+                return self.reply(400, json.dumps({"error": str(exc)}).encode())
+            try:   # no lock: element only reads the mesh, takes ~5-10 ms and releases the GIL
+                body, code = faces.element(**req), 200
+            except LookupError as exc:   # no element there: nothing faces the viewer at the click, no side face
+                body, code = json.dumps({"error": str(exc)}).encode(), 422
+            except (ValueError, TypeError) as exc:   # a value or a type element refuses
+                body, code = json.dumps({"error": str(exc)}).encode(), 400
             except Exception as exc:  # noqa: BLE001 -- the viewer shows it
-                body, code = framed({"error": repr(exc)}), 500
-            self.reply(code, body, "application/octet-stream")
+                body, code = json.dumps({"error": repr(exc)}).encode(), 500
+            self.reply(code, body)
 
         def delete(self):   # POST /found/delete {"id": ...} (text/plain: no CORS preflight)
             try:
@@ -461,7 +467,7 @@ if __name__ == "__main__":
     core = selinf_core.Survey(str(REPO / "data"), str(WORK), models.grids)
     print(f"survey + models loaded in {time.perf_counter() - t:.0f} s: {len(core.names)} photos, grids {models.grids}",
           flush=True)
-    try:   # the element faces (POST /faces) are an extra: without them the server runs and /faces answers 503
+    try:   # the element prisms (POST /element) are an extra: without them the server runs and /element answers 503
         import faces_core
 
         t = time.perf_counter()
