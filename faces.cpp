@@ -10,72 +10,100 @@
 // answer also lists every candidate face line of the section, so the owner can turn faces on and off and refit.
 // Display only, nothing is saved. Faces(V, F) is built once from the Survey's bake mesh (selinf_core's Survey.mesh():
 // the bake frame, Z-up, metres): the vertices as float32 relative to the mesh's bbox centre (a double origin, so the
-// precision holds at large coordinates), the triangles as int32, per triangle its unit normal, area and centre, and the
-// global frame: L, the dominant horizontal direction of the vertical faces (the bridge's long axis), T = Z x L, Z up.
-// No Embree, nothing shared with selinf.cpp, no threads, no per-triangle allocation: a few linear passes over the
-// triangle centres (a gather; per pass below, a sweep; pass 2's own gather), the rest on the triangles near the click.
+// precision holds at large coordinates), the triangles as int32, per triangle its unit normal, area and centre, the
+// global frame -- L, the dominant horizontal direction of the vertical faces (the bridge's long axis), T = Z x L, Z up
+// -- and a grid of the triangle centres in (L, T, Z), 1 m cells: a section or a sweep along L or T visits only the
+// cells along its box. No Embree, nothing shared with selinf.cpp, no threads, no per-triangle allocation.
 //
 // THE ALGORITHM. element(point, dir, ...) with the click and the unit view ray, in the bake frame:
-//   1. seed: the triangle under the click (the nearest facing the viewer, by its distance: near a face's edge a small
-//      one of the next face can be centred nearer), the triangles within 25 cm (or its centre's distance) facing the
-//      viewer within 30 deg of it; n0 = their area-weighted mean normal, refined to the plane there (the least
-//      eigenvector of the scatter of the centres within 1, 2, 4 m that face as n0 and lie within 5 cm of it), snapped
-//      onto L / T / Z within 5 deg (a sparse soffit's noisy triangles tilt it by 3: 30 cm off at 6 m). One pass gathers
-//      everything within 8 m.
+//   1. seed: the view ray from 1 m before the click to 1 m past it, against the triangles facing the viewer (the point
+//      comes from the LOD tile the viewer shows, 7-12 cm off the bake mesh at 7 m: near an edge the nearest triangle can
+//      be the next face's): its hit nearest the click is the clicked triangle and the click (an occluder within a metre
+//      in front that the tile does not have is passed by); a miss: the nearest triangle facing the viewer within 1.5 m.
+//      The seed: the triangles within 25 cm (or the clicked one's centre's distance) facing the viewer within 30 deg of
+//      it; n0 = their area-weighted mean normal, refined to the plane there (the least eigenvector of the scatter of the
+//      centres within 1, 2, 4 m that face as n0 and lie within 5 cm of it), snapped onto L / T / Z within 5 deg. The
+//      triangles within 8 m are gathered.
 //   2. the axes, in their order (unless one is given), perpendicular to n0. Candidates: L, T, Z where nearly perpendicular
 //      to n0, and n0 x n_k for the dominant normals n_k within 2 m at 30-150 deg to n0, snapped onto L / T / Z within
-//      5 deg. A prism runs along its faces, so first the candidate across which the clicked plane is narrowest (its
-//      triangles within angle_deg and 10 cm of it, in a slab of slab_m along the candidate, holes under 1 m bridged);
-//      within 25 % of the narrowest, the one with most side-face area within 2 m (normals within 10 deg of
-//      perpendicular). (Side-face area alone puts the road along the cross-beams under it.) Then the others, narrowest
-//      first. Each refined as the least eigenvector of sum(A n n^T) over its side faces when they span two directions.
-//   For an axis, PASS 1 is 3-8 on the section 2 slab_m long around the click, without the owner's choices. From it: the
-//   axis tilted to remove the drift of the profile edges' offsets along s over its extent (least squares, at most
-//   1 deg; a level axis in yaw only, from the faces that see it: the real girders run 0.3 deg off L, 15 cm over 30 m),
-//   and the clicked face's own extent (its triangles within 25 cm, enough for a drifting face). PASS 2 is 3-8 again on
-//   the section sampled along all of that extent, a metre past each end: up to 24 stations 25 cm long, 25 cm times a
-//   power of two apart on a grid fixed to the mesh (not to the click), so that every click on an element samples it
-//   alike; a line's persistence counts only the stations where pass 1's seed line is seen (the element's own), and the
-//   seed segment is the one on that line. An automatic axis whose element (either pass) is under 1 m long, 5 cm wide or
-//   25 % covered gives way to the next candidate, three at most; none passes: LookupError.
+//      5 deg; each refined as the least eigenvector of sum(A n n^T) over its side faces when they span two directions.
+//      First the candidate across which the clicked plane is narrowest (its triangles within angle_deg and 10 cm of it,
+//      in a slab of slab_m along the candidate, holes under 1 m bridged), within 25 % of the narrowest the one with most
+//      side-face area within 2 m; then the others, narrowest first. An element runs along its longest: pass 1 along the
+//      first two, the second first when its element is 1.5 times as long (a soffit 8 x 36 m between cross-beams 2.8 m
+//      apart is narrowest across L or across T depending on where it is clicked).
+//   Along an axis: PASS 1 is 3-8 on the section 2 slab_m long round the click: the clicked face (the seed) and the
+//   element as far as the click's surroundings tell, its extent, its drift. PASS 2a is 3-8 on stations 25 cm long every
+//   1 m over that extent (snapped out to 2 m multiples from the mesh's centre), a line's persistence counted where pass
+//   1's seed line is seen, its window round pass 1's profile (on a 1 m grid from the mesh's centre): the element. PASS
+//   2b is 3-8 on stations every 0.5 m over the element's own extent, counting the stations where 2a's element is
+//   present, its window round it, its seed on 2a's: every input fixed to the mesh or to the element, so the answer is the
+//   same wherever on the element the click is. An automatic axis is tilted to the element's drift (each edge's offset
+//   along s, least squares over the extent, at most 1 deg; a level axis in yaw only, from the faces within 60 deg of
+//   vertical: the real girders run 0.25 deg off L, 8 cm at their ends) -- pass 1's, then 2a's whole element's when that
+//   differs (pass 1 and 2a again along it: a bottom flange alone tells the yaw as 0.2 deg) --, rounded to 0.02 deg from
+//   L / T / Z; pass 1 is run again along the final axis, so the answering passes are what a refit along the answer's
+//   axis runs: the owner's keys stay. An automatic axis whose pass-1 element is under 1 m long, 5 cm wide or 25 %
+//   covered gives way to the next candidate, three at most (none: LookupError); a pass 2 that finds none so, judged
+//   without the owner's choices, gives way to the pass before it; the owner's choices go to the pass that answers.
 //   3. section frame: e2 = Z made perpendicular to a ("up"), e1 = e2 x a; for a near-vertical a, e1 = L made
 //      perpendicular, e2 = a x e1. P(u, v, s) = origin + u e1 + v e2 + s a, the origin the click to the millimetre.
-//   4. candidate segments: the stations' triangles within window_m of the axis line, normals within 25 deg of
+//   4. candidate segments: the stations' triangles within window_m of the window's centre, normals within 25 deg of
 //      perpendicular to a, projected. Directions: an area-weighted 1-deg histogram of the 2D normals, greedy peaks, each
-//      the mean of the normals within angle_deg, snapped onto e1 / e2 within 2 deg; each triangle to its nearest. Per
-//      direction, lines: the modes of the offsets (1 cm bins, smoothed; hills 5 cm apart with a valley under half
-//      between), each triangle to the nearest within 8 cm (clutter fills any "empty gap" between a girder's bottom and
-//      the soffit above). Per line, segments: where it is seen at >= 35 % of the stations, per 5 cm along it, split where
-//      it is not for 25 cm: brackets, posts, stiffeners, a cross-beam's flange meeting a girder's are not the prism's
-//      (pass 1: the seed's bins always count). Each refits its normal (snapped) and offset, its ends clipped to its
-//      triangles; under 5 cm of mean width (area / the stations' length) it is dropped, the seed's never. Keys: the
-//      order by normal angle, offset, start; the same for the same point, axis and tuning.
+//      the mean of the normals within angle_deg, snapped onto e1 / e2 within 1 deg (a 3 deg slope stays one); each
+//      triangle to its nearest. Per direction, lines: the modes of the offsets (1 cm bins from the mesh's centre,
+//      smoothed; hills 5 cm apart with a valley under half between), each triangle to the nearest within 8 cm. Per line,
+//      segments: where it is seen at >= 35 % of the stations, per 5 cm along it (bins from the mesh's centre), split
+//      where it is not for 25 cm: brackets, posts, stiffeners are not the prism's (pass 1: the seed's bins always
+//      count). Each fit: its offset the mode of its triangles' offsets, then Tukey's biweight at 3 cm (rivets, a
+//      stiffener's edge do not pull it); its normal the mean of its inliers', snapped onto e1 / e2 within 3 deg when that
+//      moves its ends 2 cm at most; its ends clipped to its triangles. Under 5 cm of mean width (area / the stations'
+//      length) or 35 % persistence it is dropped, the seed's never. Then:
+//      - collinear segments (normals within 3 deg, within 2 cm of each other's line where they meet; a plate's skin 4)
+//        are one face across a gap: a thin plate's skin across 1.5 m, whatever joins it there (a deck slab and its
+//        haunches on a girder's web: 0.4 and 1.1 m on Petrinja's -- a web passes through what joins it); any face across
+//        a hole of 0.6 m where nothing joins it (no concave corner at the gap's ends: a soffit does not run on through a
+//        girder, nor a sidewalk through it to the safety strip, 0.7 m on);
+//      - a noisy surface drawn as two bands (same-facing within 5 deg, rms 2.5 cm, 20 cm apart where they overlap by
+//        0.5 m: a soffit on a 3 deg slope) is one face, along the line through both (total least squares);
+//      - a thin plate: two skins facing apart within 12 deg, 10 cm apart at most (steel here 4-8 cm, concrete 15 cm and
+//        more), overlapping along half the shorter; a plate standing on another plate's skin splits it (a girder's web on
+//        its bottom flange's top, one line either side of it);
+//      - linked faces within 4 deg of square or of parallel are made exactly so (from the faces on e1 / e2 and the
+//        heaviest, outward through the links).
+//      Keys: the order by normal angle, offset, start; the same for the same point, axis and tuning.
 //   5. the chain. A profile is walked with the material on its left: segment i's end meets segment j's start where the
 //      lines cross up to 25 cm beyond both ends but only a little inside either (4-10 cm, a quarter of its length: not
 //      a T), or, within 20 deg of parallel, where the ends are within 25 cm: a joint, a short edge between them (round
-//      a plate's tip, when nothing is within 2-15 cm beyond it; a step). A corner is convex when j turns into i's
-//      material. From the seed segment, a step at each end in turn through the closest link (a segment under 20 cm at a
-//      10 cm handicap) to a segment ending within element_m of the seed segment (not of the click: one near a wide
-//      face's edge would reach further): through convex corners; through a concave one only into a segment shorter
-//      than concave_max_m, which ends that side; never into a ragged segment (rms over 2 cm or 3 % of its length), never
-//      so that the profile comes within 2 cm of itself. A path, or a cycle when it closes (a pier seen all round). Then
-//      the owner's: on (keys), add (the segment nearest each point within 15 cm), off (keys, last). The segments that are
-//      on link up into pieces: the chain's links, then the closest that take in a segment the owner turned on.
+//      a plate's tip, when nothing is within 2-15 cm beyond it at 35 % of the stations; a step). A corner is convex when
+//      j turns into i's material. From the seed segment, a step at each end in turn through the closest link (a segment
+//      under 20 cm at a 10 cm handicap; when that may not be taken, one within 10 cm of it that may) to a segment ending
+//      within element_m of the seed segment, never a ragged one (rms over 3 cm and 3 % of its length), never so that
+//      the profile comes within 2 cm of itself (a plate's two skins may; a loose end may overlap 15 cm). A convex corner
+//      always; a concave one between two plates' skins (a girder's web and its flange), into the other skin of a plate
+//      already in the chain, round a plate's end back to its other skin (convex corners only between: a flange the scan
+//      drew with fillets), into a plate's skin when the chain's other end meets its other skin (that flange, clicked);
+//      between faces that are not plates' only into one shorter than concave_max_m (0: never), which ends that side --
+//      a slab, a haunch, a soffit or a curb meeting an element is not its. A side that may not go on now is tried again
+//      after the other grows. A path, or a cycle when it closes (a pier, an I-girder). Then the owner's: on (keys), add
+//      (the segment nearest each point within 15 cm), off (keys, last). The segments that are on link up into pieces:
+//      the chain's links, then the closest that take in a segment the owner turned on.
 //   6. the profile: a vertex is where neighbouring lines meet (a joint's two ends sit on one perpendicular to both);
 //      an open end is the segment's own end.
-//   7. extent: every triangle within 8 cm of a profile edge in the section, its normal within 30 deg of the edge's,
-//      counts toward its 25 cm station; a station is present when its covered length (area / 25 cm per edge, at most
-//      the edge) is >= presence of the profile's length. From the click both ways until gap_m of absent stations (a
-//      girder's web hides 1-2 m behind hangers); the extent ends at the outermost vertex of the last present station's
-//      triangles. s0 / s1 replace it when given.
+//   7. extent: stations 25 cm long from the mesh's centre; every triangle within 8 cm of a profile edge in the section,
+//      its normal within 30 deg of the edge's, counts toward its station; a station is present when its covered length
+//      (area / 25 cm per edge, at most the edge) is >= presence of the profile's length. From the click both ways until
+//      gap_m of absent stations (a girder hidden 3 m behind something); the extent ends at the outermost vertex of the
+//      last present station's triangles. s0 / s1 replace it when given.
 //   8. caps: an end gets the main piece's profile closed by its chord when surface looks out of it there (normals within
 //      25 deg of -a at s0, +a at s1, within 15 cm of the end, inside that polygon) for >= 30 % of its area, and less
 //      than half that looks back (a cross-beam's web where the element meets it).
-//   Speed (Mac M5 Pro): ~10 ms a click on the real 1 M-triangle mesh (90 % under 12 ms); ~6 ms on a 1 M synthetic.
+//   Speed (Mac M5 Pro): ~25 ms a click on the real 1 M-triangle mesh (median; 90 % under 33 ms, at most ~46).
 //
 // THE ANSWER. JSON, UTF-8, compact. Bake frame, metres; positions and lengths rounded to the millimetre, unit vectors
 // unrounded.
-//   {"origin", "axis", "e1", "e2": the section frame, P(u, v, s) = origin + u e1 + v e2 + s axis;
+//   {"origin", "axis", "e1", "e2": the section frame, P(u, v, s) = origin + u e1 + v e2 + s axis, origin the click
+//      (where the view ray hits the bake mesh) to the millimetre;
 //    "s0", "s1": the extent used, "auto": [s0, s1] the automatic one;
 //    "segments": [{"key", "on", "auto", "seed", "n": [nu, nv], "c", "t": [t0, t1], "area", "rms"}]: every candidate,
 //      its points q(t) = c n + t d, d = (-nv, nu), t in [t0, t1]; on = in the element now, auto = chosen by the chain
@@ -136,6 +164,7 @@ static constexpr double LONGER = 1.5;                   // the second candidate 
 static constexpr double SNAP_MOVE = 0.02;               // a line is snapped onto e1 / e2 when its ends move this at most
 static constexpr double SNAP_D_DEG = 1;                 // a direction of the section's normals: onto e1 / e2 within this
 static constexpr double RIDGE = 0.05;                   // the tilt's least squares: the ridge, a share of the faces' weight
+static constexpr double REACH_FRAC = 0.5, REACH_MIN = 0.10;   // a corner beyond a face's end: this share of it (LINK_M at most)
 static constexpr double BAND_DEG = 5, BAND_RMS = 0.025, BAND_M = 0.2, BAND_OVER = 0.5;   // a noisy surface drawn as two bands
 static constexpr double GRID_M = 1.0, GRID_MAX = 4e6;   // the triangle centres' grid: its cell (m), its cells at most
 static constexpr double WC_M = 1.0;                     // pass 2's window is centred on a grid this fine, fixed to the mesh
@@ -334,13 +363,6 @@ class Faces {
                         const std::vector<int64_t>& off, const double* add, size_t nadd, const double* s0f, const double* s1f,
                         const Tune& tu) const {
         const auto start = std::chrono::steady_clock::now();
-#ifdef FACES_DEBUG
-        auto lap = [&](const char* what) {
-            fprintf(stderr, "t %-12s %6.2f ms\n", what, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
-        };
-#else
-        auto lap = [](const char*) {};
-#endif
         for (int k = 0; k < 3; k++)
             if (!std::isfinite(point[k]) || !std::isfinite(dir[k]) || (axis && !std::isfinite(axis[k])))
                 throw std::invalid_argument("point, dir and axis must be 3 finite numbers");
@@ -376,7 +398,6 @@ class Faces {
                 if (d2 <= r2) near.push_back({t, d2});
             });
         }
-        lap("gather");
         int32_t nearest = ray(near, p, sd.vd);   // the first hit: the click moves onto it, to the millimetre
         if (nearest >= 0) {
             for (int k = 0; k < 3; k++) org[k] = std::nearbyint((p[k] + O[k]) * 1000) / 1000, p[k] = org[k] - O[k];
@@ -426,18 +447,13 @@ class Faces {
                     for (int k = 0; k < 2; k++) lo[k] = std::min(lo[k], x[k]), hi[k] = std::max(hi[k], x[k]);
             if (!from.edges.empty()) wc[0] = (lo[0] + hi[0]) / 2, wc[1] = (lo[1] + hi[1]) / 2;
             const double q0 = a ? std::min({from.as0, from.r0, -tu.slab_m}) : from.as0, q1 = a ? std::max({from.as1, from.r1, tu.slab_m}) : from.as1;
-#ifdef FACES_DEBUG
-            fprintf(stderr, "pass2%s range [%.3f, %.3f] wc (%.3f, %.3f) axis (%.6f %.6f %.6f)\n", a ? "a" : "b", q0, q1, wc[0], wc[1], t.a[0], t.a[1], t.a[2]);
-#endif
             section(t, nullptr, p, n0, sd, tu, q0, q1, &from.segs[from.seed], wc, a ? STEP2A : STEP2, a ? nullptr : &from);
-            lap(a ? "pass2a sect" : "pass2b sect");
             choose(t, owner ? &on : nullptr, owner ? &off : nullptr, owner ? add : nullptr, owner ? nadd : 0, org, tu);
             sweep(t, p, tu);
-            lap(a ? "pass2a done" : "pass2b done");
         };
-        auto pass1 = [&](Build& t, const double* A) {   // false: no side face at the click along A
+        auto pass1 = [&](Build& t, const double* ax) {   // false: no side face at the click along ax
             t = Build();
-            std::copy(A, A + 3, t.a);
+            std::copy(ax, ax + 3, t.a);
             try {
                 section(t, &near, p, n0, sd, tu, -tu.slab_m, tu.slab_m);
             } catch (const NotFound&) {
@@ -445,7 +461,6 @@ class Faces {
             }
             choose(t, nullptr, nullptr, nullptr, 0, org, tu);
             sweep(t, p, tu);
-            lap("pass1");
             return true;
         };
         // an element runs along its longest: pass 1 along the first two candidates, the second first when its element is
@@ -466,15 +481,15 @@ class Faces {
                 one = std::move(pre[ai]);
             } else if (!pass1(one, axes[ai].data()) || (!axis && !good(one)))
                 continue;
-            double A[3];   // the axis of the passes that answer: pass 1 again along it, 2a, 2b
-            if (axis || !tilt(one, A)) std::copy(one.a, one.a + 3, A);
-            if (!axis) quantize(A);
+            double ax[3];   // the axis of the passes that answer: pass 1 again along it, 2a, 2b
+            if (axis || !tilt(one, ax)) std::copy(one.a, one.a + 3, ax);
+            if (!axis) quantize(ax);
             bool ok1 = true, ok2 = false, ok3 = false;
             for (int round = 0; round < 2; round++) {
-                if (dot(A, one.a) < 1 - 1e-12) ok1 = pass1(one, A);
+                if (dot(ax, one.a) < 1 - 1e-12) ok1 = pass1(one, ax);
                 if (!ok1) break;
                 two = Build();
-                std::copy(A, A + 3, two.a);
+                std::copy(ax, ax + 3, two.a);
                 try {
                     pass2(two, one, true, false);
                     ok2 = good(two);
@@ -483,12 +498,12 @@ class Faces {
                 }
                 if (!ok2) break;
                 double t[3];   // 2a's element tells the drift otherwise: pass 1 and 2a again along it
-                if (!axis && round == 0 && tilt(two, t) && (quantize(t), dot(t, A) < 1 - 1e-12)) {
-                    std::copy(t, t + 3, A);
+                if (!axis && round == 0 && tilt(two, t) && (quantize(t), dot(t, ax) < 1 - 1e-12)) {
+                    std::copy(t, t + 3, ax);
                     continue;
                 }
                 three = Build();
-                std::copy(A, A + 3, three.a);
+                std::copy(ax, ax + 3, three.a);
                 try {
                     pass2(three, two, false, false);
                     ok3 = good(three);
@@ -749,14 +764,6 @@ class Faces {
                 take(t, false);
             });
         }
-#ifdef FACES_DEBUG
-        const auto t0 = std::chrono::steady_clock::now();
-        auto lap2 = [&](const char* what) {
-            fprintf(stderr, "  s %-10s %6.2f ms (%zu tris)\n", what, std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(), b.st.size());
-        };
-#else
-        auto lap2 = [](const char*) {};
-#endif
         // the stations that count: all, or in pass 2 those where pass 1's seed line is seen (the element's own: stations
         // past its ends dilute nothing); the length they sample. The offsets are binned from the mesh's centre, not from
         // the click: guv is the click in the section from there.
@@ -780,7 +787,6 @@ class Faces {
         b.ns = ns, b.slen = 2 * hw;
         std::vector<std::vector<int>> runs;
         std::vector<Seg> segs = segments(b.st, tu, len, ref, guv, runs);
-        lap2("segments");
         double s0n[2] = {dot(n0, b.e1), dot(n0, b.e2)};
         int seed = -1;
         for (size_t i = 0; i < segs.size(); i++)
@@ -811,11 +817,8 @@ class Faces {
                 kept.push_back(segs[i]), kruns.push_back(std::move(runs[i]));
             }
         merge(kept, kruns, b.st, ref, s2);    // collinear segments across a junction or a hole: one face
-        lap2("merge");
         split_t(kept, kruns, b.st, ref, s2);  // a face a thin plate stands on: one either side of it
-        lap2("split");
         regularize(kept, kruns, b.st, ref);   // linked faces nearly square or parallel: exactly
-        lap2("regularize");
         std::vector<int> o(kept.size());   // the keys: by normal angle, offset, start
         std::vector<double> ang(kept.size());
         for (size_t i = 0; i < kept.size(); i++) {
@@ -1275,10 +1278,6 @@ class Faces {
                 for (int32_t t : close) if (std::fabs(dot(&N[3 * t], c)) < sup) score[i] += A[t];
             }
             const double wmin = *std::min_element(width.begin(), width.end());
-#ifdef FACES_DEBUG
-            for (size_t i = 0; i < cand.size(); i++)
-                fprintf(stderr, "axis cand (%.3f %.3f %.3f) width %.2f score %.2f\n", cand[i][0], cand[i][1], cand[i][2], width[i], score[i]);
-#endif
             for (size_t i = 0; i < cand.size(); i++)
                 if (width[i] <= TIE * wmin + 0.05 && (width[pick] > TIE * wmin + 0.05 || score[i] > score[pick])) pick = i;
         }
@@ -1815,11 +1814,14 @@ class Faces {
                 if (std::fabs(x) >= par) {   // a corner where the lines cross
                     l.p[0] = l.q[0] = (si.c * sj.n[1] - sj.c * si.n[1]) / x, l.p[1] = l.q[1] = (si.n[0] * sj.c - sj.n[0] * si.c) / x;
                     // X up to LINK_M beyond i's end and before j's start (a corner's triangles bend away: the faces' own
-                    // ends fall short), only a little inside either (no corner in the middle of a 30 cm flange: a T)
+                    // ends fall short), half a short face's length at most (a corner 22 cm past a 39 cm face's end
+                    // invents most of it), only a little inside either (no corner in the middle of a 30 cm flange: a T)
                     const double gi = dot2(da, l.p) - si.t1, gj = sj.t0 - dot2(db, l.p);
                     const double oi = std::clamp(OVER_FRAC * (si.t1 - si.t0), OVER_MIN, OVER_M);
                     const double oj = std::clamp(OVER_FRAC * (sj.t1 - sj.t0), OVER_MIN, OVER_M);
-                    if (gi > LINK_M || gi < -oi || gj > LINK_M || gj < -oj) continue;
+                    const double li = std::clamp(REACH_FRAC * (si.t1 - si.t0), REACH_MIN, LINK_M);
+                    const double lj = std::clamp(REACH_FRAC * (sj.t1 - sj.t0), REACH_MIN, LINK_M);
+                    if (gi > li || gi < -oi || gj > lj || gj < -oj) continue;
                     l.gap = std::fabs(gi) + std::fabs(gj), l.convex = x > 0;   // j turns into i's material: n_i . d_j < 0
                 } else {   // near-parallel: a joint between the ends, on one perpendicular to both
                     double ei[2], ej[2], m[2] = {da[0] + (dot2(da, db) >= 0 ? db[0] : -db[0]), da[1] + (dot2(da, db) >= 0 ? db[1] : -db[1])};
@@ -1926,10 +1928,6 @@ class Faces {
             std::fill(busy.begin(), busy.end(), 0);
             path.assign(1, fwd ? l->j : l->i), lk.assign(1, l);
             const int o = path[0];
-#ifdef FACES_DEBUG
-            fprintf(stderr, "  step %s from %d: %d (%s, gap %.3f) plate %d %d mate_in %d\n", fwd ? "fwd" : "bwd", k, o,
-                    l->convex ? "convex" : "concave", l->gap, (int)plate(k), (int)plate(o), (int)mate_in(o));
-#endif
             if (o == close) return l->convex || plate(k) || plate(o) || len(o) < tu.concave_max_m;   // closing the loop
             if (l->convex || (plate(k) && plate(o)) || mate_in(o)) return 1;
             if (plate(o) && chain.size() > 1) {   // the chain's other end meets the plate's other skin: a flange seen from it
@@ -1941,10 +1939,6 @@ class Faces {
                 busy[o] = 1;
                 for (int s = 0; s < WRAP_STEPS; s++) {
                     const Link* b = best(path.back(), fwd, close);
-#ifdef FACES_DEBUG
-                    if (b) fprintf(stderr, "    wrap %d -> %d (%s)\n", path.back(), fwd ? b->j : b->i, b->convex ? "convex" : "concave");
-                    else fprintf(stderr, "    wrap %d -> none\n", path.back());
-#endif
                     if (!b) return 0;
                     const int x = fwd ? b->j : b->i;
                     path.push_back(x), lk.push_back(b);
@@ -1957,8 +1951,9 @@ class Faces {
             return !plate(o) && len(o) < tu.concave_max_m ? 2 : 0;
         };
         // one step at the end (fwd) or the start: 1 grew, 2 grew and that side ends, 0 not now, -1 that side ends. The
-        // closest link; when the element may not go on through it, one within ALT_M of it that goes on (a fillet's end
-        // meets a girder's haunch 4 cm before its web)
+        // closest link; when the element may not go on through it, one within ALT_M of it into a thin plate's skin that
+        // goes on (a fillet's end meets a girder's haunch 4 cm before its web; an edge beam's chamfer, where it meets the
+        // sidewalk's underside, takes no line 10 cm on)
         auto step = [&](bool fwd) -> int {
             const int k = fwd ? chain.back() : chain.front(), close = chain.size() > 1 ? (fwd ? chain.front() : chain.back()) : -1;
             std::fill(busy.begin(), busy.end(), 0);
@@ -1975,6 +1970,7 @@ class Faces {
             std::vector<const Link*> lk;
             int res = 0;
             for (size_t c = 0; c < cand.size() && cand[c].first <= cand[0].first + ALT_M && !res; c++) {
+                if (c > 0 && !plate(fwd ? cand[c].second->j : cand[c].second->i)) continue;
                 res = decide(cand[c].second, k, fwd, close, path, lk);
                 if (res == 2 && c > 0) res = 0;
             }
@@ -2003,11 +1999,6 @@ class Faces {
             for (int side = 0; side < 2 && !closed; side++) {
                 if (state[side] < 0) continue;
                 const int r = step(side == 0);
-#ifdef FACES_DEBUG
-                fprintf(stderr, "grow %s -> %d, chain:", side ? "bwd" : "fwd", r);
-                for (int x : chain) fprintf(stderr, " %d", x);
-                fprintf(stderr, "\n");
-#endif
                 if (r >= 1) grew = true, state[side] = r == 2 ? -1 : 1;
                 else state[side] = r;
             }
