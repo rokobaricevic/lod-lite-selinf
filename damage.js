@@ -900,16 +900,36 @@ function pickDamage(ndc, mouse, dist) {
     }
   };
   for (const it of app.concat(finds)) {
-    if (!it.c.on || !meets(it.b, 0)) continue;
+    if (!it.c.on || (!it.xyz && it.c.appLod) || !meets(it.b, 0)) continue; // a chunked app class: below
     const L = it.xyz && it.lod?.at ? it.lod : null;
     if (L) { for (let c = 0; c < L.n; c++) if (meets(L.box, c * 6)) for (let i = c; i < L.at.length - 1; i += L.n) scan(it, it.xyz, L.at[i] * 3, L.at[i + 1] * 3, Z, U); }
     else if (it.xyz) scan(it, it.xyz, 0, it.n * 3, Z, U);
     else scan(it, Q, it.s * 3, (it.s + it.n) * 3, B, K);
   }
+  // a chunked app class: the points of the chunks the ray meets, through its index (Q's order stays); the item: the run
+  // holding the point (its items sorted by start)
+  for (const c of C) {
+    const A = c.appLod;
+    if (!A || !c.on) continue;
+    const L = A.all, ix = A.idx.array, s0 = A.jc.start, its = (A.items ??= app.filter((it) => it.c === c).sort((p, q) => p.s - q.s));
+    for (let ch = 0; ch < L.n; ch++) {
+      if (!meets(L.box, ch * 6)) continue;
+      for (let i = ch; i < L.at.length - 1; i += L.n) for (let e = L.at[i], end = L.at[i + 1]; e < end; e++) {
+        const p = s0 + ix[e], j = p * 3, x = B[0] + Q[j] * K[0] - o[0], y = B[1] + Q[j + 1] * K[1] - o[1], z = B[2] + Q[j + 2] * K[2] - o[2];
+        const t = x * dir[0] + y * dir[1] + z * dir[2];
+        if (t <= 0 || t > tmax) continue;
+        const s2 = (x * x + y * y + z * z - t * t) / (k * k * t * t);
+        if (s2 >= bs) continue;
+        let lo = 0, hi = its.length - 1; // the last item starting at or before p
+        while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (its[mid].s <= p) lo = mid; else hi = mid - 1; }
+        bs = s2; best = its[lo];
+      }
+    }
+  }
   return best;
 }
 // for the bench's probe (bench/lod_probe.py): the LOD's parts, the finds and the tap's scan
-lod.dm = { finds: () => finds, C, chunkLod, c2f, chunkRanges, lodUpdate, pickDamage, tstat, Fr, cumK, isCrack,
+lod.dm = { finds: () => finds, app: () => ({ app, Q, B, K }), C, chunkLod, c2f, chunkRanges, lodUpdate, pickDamage, tstat, Fr, cumK, isCrack,
   knobs: { LOD, LOD_PX, LOD_BAND, LV, CHUNK, MINPX, MD: !!MD, thinMm: () => thinMm } };
 lod.selectDamage = (tid) => select(app.concat(finds).find((x) => x.tid === tid) ?? null); // for the bench (--eval): 'P9', 'C-4'
 

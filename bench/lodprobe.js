@@ -28,7 +28,7 @@ function items() {
 const cache = new Map();
 function build(it, lv, ch) {
   const k = `${it.f.id}|${it.band}|${it.ids.length}|${lv}|${ch}`;
-  if (!cache.has(k)) cache.set(k, dm().chunkLod(it.f.xyz, it.ids, it.v, it.f.b, lv, ch));
+  if (!cache.has(k)) cache.set(k, Object.assign(dm().chunkLod(it.f.xyz, it.ids, it.v, it.f.b, lv, ch), { band: it.band }));
   return cache.get(k);
 }
 const level = (c0, P, depth, lim, lv) => Math.min(lv, Math.max(0, Math.ceil(Math.log2((c0 * P) / (depth * lim)) - 1e-9)));
@@ -81,13 +81,14 @@ function pickRef(ndc, mouse, dist) {
   const k = (2 * Math.tan((cam.fov * Math.PI) / 360)) / L.el.clientHeight, R = mouse ? 8 : 16, tmax = dist * 1.02 + 0.02;
   const box = new THREE.Box3(), at = new THREE.Vector3();
   let best = null, bs = R * R;
-  for (const it of dm().finds()) {
+  const { app, Q, B, K } = dm().app(), Z = [0, 0, 0], U = [1, 1, 1];
+  for (const it of app.concat(dm().finds())) {
     if (!it.c.on) continue;
     box.setFromArray(it.b).expandByScalar(R * k * tmax);
     if (!box.containsPoint(ray.origin) && !(ray.intersectBox(box, at) && at.distanceTo(ray.origin) <= tmax)) continue;
-    const A = it.xyz;
-    for (let j = 0; j < it.n * 3; j += 3) {
-      const x = A[j] - o[0], y = A[j + 1] - o[1], z = A[j + 2] - o[2], t = x * dir[0] + y * dir[1] + z * dir[2];
+    const [A, j0, b0, s0] = it.xyz ? [it.xyz, 0, Z, U] : [Q, it.s * 3, B, K];
+    for (let j = j0; j < j0 + it.n * 3; j += 3) {
+      const x = b0[0] + A[j] * s0[0] - o[0], y = b0[1] + A[j + 1] * s0[1] - o[1], z = b0[2] + A[j + 2] * s0[2] - o[2], t = x * dir[0] + y * dir[1] + z * dir[2];
       if (t <= 0 || t > tmax) continue;
       const s2 = (x * x + y * y + z * z - t * t) / (k * k * t * t);
       if (s2 < bs) { bs = s2; best = it; }
@@ -105,8 +106,10 @@ export function cpu() {
   // taps: a 5 x 5 grid, and on 3 points of each find (where they project on screen)
   const taps = [];
   for (let y = -0.8; y <= 0.81; y += 0.4) for (let x = -0.8; x <= 0.81; x += 0.4) taps.push([x, y]);
-  for (const f of dm().finds()) for (const q of [0.1, 0.5, 0.9]) {
-    const j = Math.floor(f.n * q) * 3, w = L.src2w([f.xyz[j], f.xyz[j + 1], f.xyz[j + 2]]).project(cam);
+  const { app, Q, B, K } = dm().app();
+  for (const f of [...dm().finds(), ...app]) for (const q of [0.1, 0.5, 0.9]) {
+    const i = Math.floor(f.n * q), p = f.xyz ? [0, 1, 2].map((d) => f.xyz[i * 3 + d]) : [0, 1, 2].map((d) => B[d] + Q[(f.s + i) * 3 + d] * K[d]);
+    const w = L.src2w(p).project(cam);
     if (Math.abs(w.x) < 0.98 && Math.abs(w.y) < 0.98 && w.z < 1) taps.push([w.x, w.y]);
   }
   for (const [x, y] of taps) {
