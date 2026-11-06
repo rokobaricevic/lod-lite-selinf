@@ -102,8 +102,8 @@ with the opacity, so overlapping points never add up. That pass blurs the mask b
 B-spline filtered) and thresholds it with an antialiased edge: round outlines instead of squares, small gaps filled,
 and a thin dark outline. The same pass antialiases the scene with FXAA, only where the depth steps or creases (the
 bridge's edges, not its texture): 4x MSAA was most of the frame on a weak GPU and 44 bytes per pixel, and the mask's
-edges barely changed without it. `?dmsamples=4&dmaa=0` is the look before; `?dmaa=1|2` FXAA quality / console (2 is
-the default at a pixel ratio of 2), `?dmaad=0` FXAA everywhere. A find's points are stored coarse to fine, so far away only an even subsample is drawn (a
+edges barely changed without it (members thinner than a pixel, far away, do break into dashes). `?dmsamples=4&dmaa=0`
+is the look before; `?dmaa=2` the lighter FXAA (console), `?dmaad=0` FXAA everywhere. A find's points are stored coarse to fine, so far away only an even subsample is drawn (a
 thinned crack's band gets its own coarse-to-fine order, rebuilt when its width changes).
 `?dmpost=0` is the old path (blended squares); `?dmlook=plain|smooth|fill|outline` and `?dmk= ?dmt= ?dmo=` tune it.
 

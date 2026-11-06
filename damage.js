@@ -158,15 +158,16 @@ const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(
 const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), INLINE = POST && !HALF && !!knob('dminline', 1);
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // AA: no MSAA, FXAA on the scene in the composite instead. 4x MSAA was most of the frame on a weak GPU (the Intel UHD at
-// 1080p: 6-45 ms with it, 4-18 without) and 44 of the targets' 57 bytes per pixel; FXAA costs ~1 ms there. The mask's
-// edges keep their own AA (the threshold's fwidth): MSAA changed them by little (bench aa-r1..aa-f3, 2026-11-06).
-// ?dmsamples= the scene target's MSAA samples (the mask's too when inline: one FBO; 4: the look before). ?dmaa=1: FXAA 3.11
-// quality (preset 12), before the mask goes over the scene; 2: FXAA 3.11 console (lighter: no edge search, no subpixel
-// blur), the default at a pixel ratio of 2 (phones, tablets: smaller pixels, more of them); 0: none. ?dmfxt= ?dmfxm=
-// ?dmfxs= its edge threshold, its minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel> (default 0.02; 0: everywhere):
-// only where the depth has a step or a crease (|2nd difference of ln depth| > rel): the bridge's edges (what MSAA smoothed),
-// not its texture's detail (FXAA everywhere softens it). Inline it needs ?dmsamples=0 (the depth: a plain texture, no resolve)
-const SAMPLES = knob('dmsamples', 0), AA = POST ? knob('dmaa', SAMPLES ? 0 : R.getPixelRatio() >= 2 ? 2 : 1) : 0;
+// 1080p: 6.5-44 ms with it, 4.9-19 with this; on the RTX lost in the noise) and 44 of the targets' 57 bytes per pixel. The
+// mask's edges keep their own AA (the threshold's fwidth): MSAA changed them by little (bench aa-r1..aa-f3, 2026-11-06).
+// What FXAA cannot bring back: members thinner than a pixel far away (the railings in the fit view) break into dashes.
+// ?dmsamples= the scene target's MSAA samples (the mask's too when inline: one FBO; ?dmsamples=4&dmaa=0: the look before).
+// ?dmaa=1: FXAA 3.11 quality (preset 12), before the mask goes over the scene; 2: FXAA 3.11 console (no edge search, no
+// subpixel blur: ~0.2 ms cheaper at 1440p, a little coarser); 0: none. ?dmfxt= ?dmfxm= ?dmfxs= its edge threshold, its
+// minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel> (default 0.02; 0: everywhere): only where the depth has a step
+// or a crease (|2nd difference of ln depth| > rel): the bridge's edges (what MSAA smoothed), not its texture's detail (FXAA
+// everywhere softens it). Inline it needs ?dmsamples=0 (the depth is then a plain texture, no resolve)
+const SAMPLES = knob('dmsamples', 0), AA = POST ? knob('dmaa', SAMPLES ? 0 : 1) : 0;
 const AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0.02) : 0;
 // FXAA wants the sRGB-encoded scene (?dmlin=1, below): its edge search reads bilinear taps between two rows and needs their
 // luma to be the mean of the two rows' lumas, which a linear target's taps (averaged before the encode) are not
