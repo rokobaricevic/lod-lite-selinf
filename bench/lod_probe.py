@@ -65,8 +65,12 @@ async def main():
             c = await page.evaluate("(cf) => lodprobe.counts(cf)", configs)
             u = await page.evaluate("lodprobe.cpu()")
             res["views"][v] = {"counts": c, "cpu": u}
-            print(f"\n== {v}: lodUpdate {u['lodUs']} us/frame; pick ms (tiles / damage): "
-                  + " ".join(f"{q['tiles']}/{q['dmg']}" for q in u["picks"]), flush=True)
+            pk = u["picks"]
+            med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
+            print(f"\n== {v}: lodUpdate {u['lodUs']} us/frame; {len(pk)} taps, {sum(q['hit'] is not None for q in pk)} on damage, "
+                  f"{sum(q['hit'] != q['ref'] for q in pk)} differ from the full scan; ms median/max: tiles {med([q['tiles'] for q in pk])}/"
+                  f"{max([q['tiles'] for q in pk], default=None)}, damage {med([q['dmg'] for q in pk])}/{max([q['dmg'] for q in pk], default=None)}, "
+                  f"full scan {med([q['full'] for q in pk])}/{max([q['full'] for q in pk], default=None)}", flush=True)
             print(f"{'config':<24}{'n':>8}{'vis':>8}{'find':>8}{'chunk':>8}{'oracle':>8}{'chunks':>7}{'ranges':>7}")
             for name, t in c.items():
                 print(f"{name:<24}{t['n']:>8}{t['vis']:>8}{t['find']:>8}{t['chunk']:>8}{t['oracle']:>8}{t['chunks']:>7}{t['ranges']:>7}")

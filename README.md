@@ -100,8 +100,12 @@ How the damage is drawn (`damage.js`): the scene renders into an MSAA target; th
 mask that shares its depth (the bridge in front hides them), and one full-screen pass lays the mask over the scene
 with the opacity, so overlapping points never add up. That pass blurs the mask by about half a point's size (its mips,
 B-spline filtered) and thresholds it with an antialiased edge: round outlines instead of squares, small gaps filled,
-and a thin dark outline. A find's points are stored coarse to fine, so far away only an even subsample is drawn (a
-thinned crack's band gets its own coarse-to-fine order, rebuilt when its width changes).
+and a thin dark outline. The points are grouped into chunks of ~0.64 m, stored chunk after chunk and coarse to fine
+in each, so each frame a chunk out of view is skipped and one far away draws only an even subsample (its prefix for
+its own nearest depth); all of a Points' chunk prefixes are one WEBGL_multi_draw call. A find's own floats are stored
+that way; the app's classes (one Points each) draw through an index in that order; a thinned crack's band gets its
+own chunked order, rebuilt when its width changes. A tap scans only the chunks its ray meets. `?dmchunk=0` is the
+previous LOD (one prefix per find, none for the app's damage); `?dmlodpx= ?dmlodband= ?dmlv=` tune it.
 `?dmpost=0` is the old path (blended squares); `?dmlook=plain|smooth|fill|outline` and `?dmk= ?dmt= ?dmo=` tune it.
 
 What "Prepoznaj oštećenja" finds is saved on the PC (`selinf.py`'s FoundStore, in `out/found/`: `found.json`, one

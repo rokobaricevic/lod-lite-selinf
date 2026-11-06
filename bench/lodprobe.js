@@ -33,42 +33,28 @@ function build(it, lv, ch) {
 }
 const level = (c0, P, depth, lim, lv) => Math.min(lv, Math.max(0, Math.ceil(Math.log2((c0 * P) / (depth * lim)) - 1e-9)));
 function count(it, L, V, px, band, minPx) {
-  const { o, d, P, pl } = V, a = it.f.xyz, E = L.lv + 1, od = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], lv = L.lv;
+  const { o, d, P, pl } = V, a = it.f.xyz, od = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], lv = L.lv, n = L.n;
   const lim = (dep) => (it.band ? band * Math.max(minPx, (it.size * P) / dep) : px);
   const r = { find: 0, chunk: 0, oracle: 0, vis: 0, n: it.ids.length, ranges: 0 };
-  // find: the find's box's nearest corner
+  // find: the find's box's nearest corner (master: one prefix, no culling but three's per-object one)
   const b = it.f.b;
   let dmin = Infinity;
   for (let c = 0; c < 8; c++) dmin = Math.min(dmin, (b[c & 1 ? 3 : 0] - o[0]) * d[0] + (b[c & 2 ? 4 : 1] - o[1]) * d[1] + (b[c & 4 ? 5 : 2] - o[2]) * d[2]);
-  const kf = dmin > 0 ? level(L.c0, P, dmin, lim(dmin), lv) : lv;
-  let end = -1;
-  for (let c = 0; c < L.n; c++) {
-    r.find += L.ends[c * E + kf];
-    const q = c * 6, bx = L.box, [x0, y0, z0, x1, y1, z1] = bx.subarray(q, q + 6);
-    const dmax = (d[0] > 0 ? x1 : x0) * d[0] + (d[1] > 0 ? y1 : y0) * d[1] + (d[2] > 0 ? z1 : z0) * d[2] - od;
-    const cmin = (d[0] > 0 ? x0 : x1) * d[0] + (d[1] > 0 ? y0 : y1) * d[1] + (d[2] > 0 ? z0 : z1) * d[2] - od;
-    let inF = dmax > 0;
-    if (inF) {
-      const pad = 0.5 * Math.max(it.size, (minPx * dmax) / P);
-      for (const [nx, ny, nz, w] of pl) if ((nx > 0 ? x1 : x0) * nx + (ny > 0 ? y1 : y0) * ny + (nz > 0 ? z1 : z0) * nz + w < -pad) { inF = false; break; }
-    }
-    if (inF) {
-      const k = cmin > 0 ? level(L.c0, P, cmin, lim(cmin), lv) : lv, m = L.ends[c * E + k];
-      if (m) { r.chunk += m; if (L.first[c] !== end) r.ranges++; end = m === L.ends[c * E + lv] ? L.first[c] + m : -1; }
-    }
-    // per point: in the frustum (padded by its sprite) and its level under its own depth's
-    for (let k = 0, i = L.first[c]; k <= lv; k++) {
-      for (const e = L.first[c] + L.ends[c * E + k]; i < e; i++) {
-        const j = L.order[i] * 3, x = a[j], y = a[j + 1], z = a[j + 2], dep = x * d[0] + y * d[1] + z * d[2] - od;
-        if (dep <= 0) continue;
-        const pad = 0.5 * Math.max(it.size, (minPx * dep) / P);
-        let ok = true;
-        for (const [nx, ny, nz, w] of pl) if (nx * x + ny * y + nz * z + w < -pad) { ok = false; break; }
-        if (!ok) continue;
-        r.vis++;
-        if (k <= level(L.c0, P, dep, lim(dep), lv)) r.oracle++;
-      }
-    }
+  r.find = L.at[(dmin > 0 ? level(L.c0, P, dmin, lim(dmin), lv) : lv) * n + n];
+  // chunk: damage.js's own chunkRanges with this config (in-frustum chunks, their own prefix, GAP-bridged ranges)
+  const rg = {}, Fp = new Float64Array(pl.flat());
+  dm().chunkRanges(L, o, d, P, it.size, rg, px, band, Fp);
+  r.chunk = rg.pts; r.ranges = rg.nd;
+  // per point: in the frustum (padded by its sprite) and its level under its own depth's
+  for (let l = 0; l <= lv; l++) for (let i = L.at[l * n], e = L.at[l * n + n]; i < e; i++) {
+    const j = L.order[i] * 3, x = a[j], y = a[j + 1], z = a[j + 2], dep = x * d[0] + y * d[1] + z * d[2] - od;
+    if (dep <= 0) continue;
+    const pad = 0.5 * Math.max(it.size, (minPx * dep) / P);
+    let ok = true;
+    for (const [nx, ny, nz, w] of pl) if (nx * x + ny * y + nz * z + w < -pad) { ok = false; break; }
+    if (!ok) continue;
+    r.vis++;
+    if (l <= level(L.c0, P, dep, lim(dep), lv)) r.oracle++;
   }
   return r;
 }
@@ -87,6 +73,28 @@ export function counts(configs) {
   }
   return out;
 }
+// master's tap scan: every point of every item whose padded box the ray meets (a find's floats; app items: lod.dm.app)
+function pickRef(ndc, mouse, dist) {
+  const L = window.lod, cam = L.camera, caster = new THREE.Raycaster();
+  caster.setFromCamera(ndc, cam);
+  const o = L.w2src(caster.ray.origin), dir = L.w2src(caster.ray.direction), ray = new THREE.Ray(new THREE.Vector3(...o), new THREE.Vector3(...dir));
+  const k = (2 * Math.tan((cam.fov * Math.PI) / 360)) / L.el.clientHeight, R = mouse ? 8 : 16, tmax = dist * 1.02 + 0.02;
+  const box = new THREE.Box3(), at = new THREE.Vector3();
+  let best = null, bs = R * R;
+  for (const it of dm().finds()) {
+    if (!it.c.on) continue;
+    box.setFromArray(it.b).expandByScalar(R * k * tmax);
+    if (!box.containsPoint(ray.origin) && !(ray.intersectBox(box, at) && at.distanceTo(ray.origin) <= tmax)) continue;
+    const A = it.xyz;
+    for (let j = 0; j < it.n * 3; j += 3) {
+      const x = A[j] - o[0], y = A[j + 1] - o[1], z = A[j + 2] - o[2], t = x * dir[0] + y * dir[1] + z * dir[2];
+      if (t <= 0 || t > tmax) continue;
+      const s2 = (x * x + y * y + z * z - t * t) / (k * k * t * t);
+      if (s2 < bs) { bs = s2; best = it; }
+    }
+  }
+  return best;
+}
 // CPU: lodUpdate per frame; the tap's scan at a grid of screen points (and the tiles' raycast before it)
 export function cpu() {
   const L = window.lod, cam = L.camera, R = L.renderer, H = R.getDrawingBufferSize(new THREE.Vector2()).y, P = (cam.projectionMatrix.elements[5] * H) / 2;
@@ -94,13 +102,22 @@ export function cpu() {
   for (let i = 0; i < N; i++) dm().lodUpdate(cam, P);
   const lodUs = ((performance.now() - t0) / N) * 1000;
   const picks = [];
-  for (let y = -0.8; y <= 0.81; y += 0.4) for (let x = -0.8; x <= 0.81; x += 0.4) {
+  // taps: a 5 x 5 grid, and on 3 points of each find (where they project on screen)
+  const taps = [];
+  for (let y = -0.8; y <= 0.81; y += 0.4) for (let x = -0.8; x <= 0.81; x += 0.4) taps.push([x, y]);
+  for (const f of dm().finds()) for (const q of [0.1, 0.5, 0.9]) {
+    const j = Math.floor(f.n * q) * 3, w = L.src2w([f.xyz[j], f.xyz[j + 1], f.xyz[j + 2]]).project(cam);
+    if (Math.abs(w.x) < 0.98 && Math.abs(w.y) < 0.98 && w.z < 1) taps.push([w.x, w.y]);
+  }
+  for (const [x, y] of taps) {
     const ndc = new THREE.Vector2(x, y), a = performance.now(), hit = L.pick(ndc), b = performance.now();
     if (!hit) continue;
     let best = null;
     const reps = 5, c = performance.now();
     for (let i = 0; i < reps; i++) best = dm().pickDamage(ndc, true, hit.distance);
-    picks.push({ x: +x.toFixed(1), y: +y.toFixed(1), tiles: +(b - a).toFixed(2), dmg: +((performance.now() - c) / reps).toFixed(3), hit: best?.tid ?? null });
+    const t = performance.now(), ref = pickRef(ndc, true, hit.distance), tr = performance.now() - t;
+    picks.push({ x: +x.toFixed(1), y: +y.toFixed(1), tiles: +(b - a).toFixed(2), dmg: +((performance.now() - c - tr) / reps).toFixed(3),
+      full: +tr.toFixed(3), hit: best?.tid ?? null, ref: ref?.tid ?? null });
   }
   return { lodUs: +lodUs.toFixed(1), picks };
 }

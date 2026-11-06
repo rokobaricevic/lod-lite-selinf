@@ -276,17 +276,18 @@ void main() {
 })();
 // the frame (viewer.html's loop and bench.py both call lod.renderFrame): the scene without the damage into post.scene, the
 // damage (the selected one in it, lighter) into the mask (only when some is in view), the composite onto the canvas
-// LOD (POST; ?dmlod=0: off): a find's points are reordered coarse to fine (one per cell of 64, 32, ... 2 voxels, then the
-// rest), so any prefix is an even subsample; each frame a find draws only the prefix whose spacing stays under LOD_PX px
-// at its nearest depth. Far away its sprites overlap many times anyway, and the mask shows coverage, not count.
-// Thinned cracks (below) draw a band of a crack's points; then that band is ordered coarse to fine on its own (an index),
-// with a finer limit (?dmlodpx= ?dmlodband= tune them).
+// LOD (POST; ?dmlod=0: off): the points are ordered coarse to fine (one per cell of 64, 32, ... 2 voxels, then the rest),
+// so a prefix is an even subsample, and drawn only as fine as their spacing stays under LOD_PX px at their nearest depth.
+// Far away their sprites overlap many times anyway, and the mask shows coverage, not count. Thinned cracks (below) draw
+// a band of a crack's points, ordered coarse to fine on its own (an index), with a finer limit (?dmlodpx= ?dmlodband=).
+// CHUNK (?dmchunk=<m>; 0: master's one prefix per find, and none for the app's damage): the levels are kept per chunk,
+// a cube of ~CHUNK m aligned to the box the cells are (so a cell never straddles two chunks): each frame a chunk out of
+// the frustum is skipped and one in it is drawn up to the level its own nearest depth asks for. Stored level-major
+// (level 0 of every chunk, then level 1, ...), so a far find is one range and a near one a run per level; a Points'
+// ranges are one WEBGL_multi_draw call (drawChunks, in its onAfterRender: three draws an empty range, the multi-draw
+// reuses its state). A find's floats are stored in that order; an app class draws through an index in it. The chunks'
+// boxes are also the tap's index (pickDamage scans only the chunks the ray meets).
 const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LOD_BAND = knob('dmlodband', 0.35), LV = knob('dmlv', 6);
-// CHUNK (?dmchunk=<m>; 0: one prefix per find, as before): the points are grouped into cubes of ~CHUNK m (aligned to the
-// find's box: the LOD cells nest in them), stored chunk after chunk, each chunk coarse to fine on its own; each frame a
-// chunk is frustum-culled and draws the prefix its own nearest depth asks for. All of a Points' chunk prefixes are one
-// WEBGL_multi_draw call (drawChunks, in its onAfterRender: three draws an empty range, the multi-draw reuses its state).
-// The chunks' boxes are also the tap's index (pickDamage scans only the chunks the ray meets).
 const CHUNK = LOD ? knob('dmchunk', 0.64) : 0, SKIP = knob('dmskip', 0); // SKIP (bench): never the finest SKIP levels (with ?dmszk=, bigger sprites)
 function c2f(a, ids, v, b, lv = LV) { // the points ids (of xyz a, box b, voxel v) coarse to fine: {order, ends[k]: points up to level k, s[k]: its cell}
   const n = ids.length, done = new Uint8Array(n), picked = [], ends = [], s = [];
@@ -309,10 +310,10 @@ function c2f(a, ids, v, b, lv = LV) { // the points ids (of xyz a, box b, voxel 
 }
 // chunkLod: c2f's levels, per chunk. A point's level is the coarsest whose cell (v * 2^(lv - k), aligned to b) it is the
 // first point of, in ids' order (the same points c2f picks: the first point of a cell is also the first of the finer
-// cells inside it); a chunk's points are sorted by level (stable), so its prefix up to level k is c2f's restricted to it.
-// Typed arrays only: per chunk, a dense "first point" grid per level (reset after the chunk), the levels coarser than a
-// chunk over the chunks' first points. -> {order: ids chunk after chunk, n chunks, first[c], ends[c * (lv + 1) + k]:
-// its points up to level k, box[c * 6]: their bounds, c0: level 0's cell, lv}
+// cells inside it), so a chunk's points up to level k are c2f's restricted to it. Typed arrays only (c2f's Set of
+// float keys took 4x as long): per chunk, a dense "first point" grid per level (reset after the chunk); the levels
+// coarser than a chunk over the chunks' first points. -> {order: the ids level-major, n chunks, at[l * n + c]: where
+// chunk c's level-l points start (at[l * n + c + 1]: end), box[c * 6]: the chunk's bounds, c0: level 0's cell, lv}
 const SCR = [];
 function chunkLod(a, ids, v, b, lv = LV, chM = CHUNK) {
   const m = ids.length, fine = 2 * v, cs = Math.max(0, Math.min(6, Math.round(Math.log2(chM / fine)))), msk = (1 << cs) - 1;
@@ -367,20 +368,20 @@ function chunkLod(a, ids, v, b, lv = LV, chM = CHUNK) {
     rs = rs.filter((r) => best.get(key(r)) === r);
     for (const r of rs) lvl[r] = lv - 1 - j;
   }
-  const E = lv + 1, order = new Uint32Array(m), ends = new Int32Array(nch * E), box = new Float32Array(nch * 6), cnt = new Int32Array(lv + 2);
-  for (let c = 0; c < nch; c++) {
-    cnt.fill(0);
-    for (let i = st[c]; i < st[c + 1]; i++) cnt[lvl[perm[i]] + 1]++;
-    for (let k = 0; k <= lv; k++) { cnt[k + 1] += cnt[k]; ends[c * E + k] = cnt[k + 1]; }
-    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
-    for (let i = st[c]; i < st[c + 1]; i++) {
-      const r = perm[i], id = ids[r], j = id * 3, x = a[j], y = a[j + 1], z = a[j + 2];
-      order[st[c] + cnt[lvl[r]]++] = id;
-      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
-    }
-    box.set([x0, y0, z0, x1, y1, z1], c * 6);
+  // the order: level-major (level 0 of every chunk, then level 1, ...), chunk after chunk in a level, ids' order in a
+  // chunk's level: a prefix of all levels <= k is one range (a far find: one draw), and a chunk's refinement is a run
+  // per level (neighbouring chunks' runs merge)
+  const E = lv + 1, at = new Int32Array(E * nch + 1), box = new Float32Array(nch * 6).fill(Infinity), order = new Uint32Array(m);
+  for (let c = 0; c < nch; c++) box.fill(-Infinity, c * 6 + 3, c * 6 + 6);
+  for (let r = 0; r < m; r++) at[lvl[r] * nch + ck[r] + 1]++;
+  for (let i = 0; i < E * nch; i++) at[i + 1] += at[i];
+  const put = at.slice(0, E * nch);
+  for (let r = 0; r < m; r++) {
+    const c = ck[r], id = ids[r], j = id * 3, q = c * 6;
+    order[put[lvl[r] * nch + c]++] = id;
+    for (let k = 0; k < 3; k++) { const x = a[j + k]; if (x < box[q + k]) box[q + k] = x; if (x > box[q + 3 + k]) box[q + 3 + k] = x; }
   }
-  return { order, n: nch, first: st.subarray(0, nch), ends, box, c0: v * 2 ** lv, lv, band: false };
+  return { order, n: nch, at, box, c0: v * 2 ** lv, lv, band: false };
 }
 function progressive(it) { // the find's own floats, stored coarse to fine (a permutation: every point stays, picking reads them all)
   const a = it.xyz, n = it.n, ids = Uint32Array.from({ length: n }, (_, i) => i), t = performance.now();
@@ -391,37 +392,45 @@ function progressive(it) { // the find's own floats, stored coarse to fine (a pe
   it.xyz = out; it.lod = L ?? { ends, s };
   tstat.prog += performance.now() - t;
 }
-// a chunked Points' ranges for this frame (in g.userData.rg, shared with the selection's Points): the chunks in the
-// frustum (in the source frame, padded by a sprite), each its prefix for its own nearest depth; runs of whole chunks merge
-const Fr = new Float64Array(24), frs = new THREE.Frustum(), pvs = new THREE.Matrix4();
-function chunkRanges(L, o, d, P, sizeM, r) {
-  const { n, lv, ends, box, first, c0 } = L, E = lv + 1, od = o[0] * d[0] + o[1] * d[1] + o[2] * d[2];
-  if (!(r.firsts?.length >= n)) { r.firsts = new Int32Array(n); r.counts = new Int32Array(n); r.offs = new Int32Array(n); }
-  const fi = r.firsts, co = r.counts, [d0, d1, d2] = d;
-  let nd = 0, pts = 0, end = -1;
+// a chunked Points' ranges for this frame (in g.userData.rg, shared with the selection's Points): each chunk in the
+// frustum (planes pl, in the source frame, padded by a sprite) up to the level its own nearest depth asks for (as
+// lodUpdate's per-find prefix: the coarsest whose cell is under px, a band's under bandK sprites), level by level;
+// a range starting within GAP points of the last one's end extends it (a few culled coarse points are cheaper than a draw)
+const Fr = new Float64Array(24), frs = new THREE.Frustum(), pvs = new THREE.Matrix4(), GAP = knob('dmgap', 64);
+function chunkRanges(L, o, d, P, sizeM, r, px = LOD_PX, bandK = LOD_BAND, pl = Fr) {
+  const { n, lv, at, box, c0 } = L, od = o[0] * d[0] + o[1] * d[1] + o[2] * d[2], [d0, d1, d2] = d;
+  if (!(r.kk?.length >= n)) { r.kk = new Int8Array(n); r.firsts = new Int32Array((lv + 1) * n); r.counts = new Int32Array((lv + 1) * n); r.offs = new Int32Array((lv + 1) * n); }
+  const kk = r.kk, fi = r.firsts, co = r.counts;
+  let top = -1;
   for (let c = 0, q = 0; c < n; c++, q += 6) {
+    kk[c] = -1;
     const x0 = box[q], y0 = box[q + 1], z0 = box[q + 2], x1 = box[q + 3], y1 = box[q + 4], z1 = box[q + 5];
     const dmax = (d0 > 0 ? x1 : x0) * d0 + (d1 > 0 ? y1 : y0) * d1 + (d2 > 0 ? z1 : z0) * d2 - od;
     if (dmax <= 0) continue;
     const pad = 0.5 * Math.max(sizeM, (MINPX * dmax) / P);
     let p = 0;
     for (; p < 24; p += 4) {
-      const nx = Fr[p], ny = Fr[p + 1], nz = Fr[p + 2];
-      if ((nx > 0 ? x1 : x0) * nx + (ny > 0 ? y1 : y0) * ny + (nz > 0 ? z1 : z0) * nz + Fr[p + 3] < -pad) break;
+      const nx = pl[p], ny = pl[p + 1], nz = pl[p + 2];
+      if ((nx > 0 ? x1 : x0) * nx + (ny > 0 ? y1 : y0) * ny + (nz > 0 ? z1 : z0) * nz + pl[p + 3] < -pad) break;
     }
     if (p < 24) continue; // outside a plane
     const dmin = (d0 > 0 ? x0 : x1) * d0 + (d1 > 0 ? y0 : y1) * d1 + (d2 > 0 ? z0 : z1) * d2 - od;
     let k = lv - SKIP;
-    if (dmin > 0) { // the coarsest level whose cell, at dmin, is under lim px (as lodUpdate's per-find prefix)
-      const lim = L.band ? LOD_BAND * Math.max(MINPX, (sizeM * P) / dmin) : LOD_PX;
+    if (dmin > 0) {
+      const lim = L.band ? bandK * Math.max(MINPX, (sizeM * P) / dmin) : px;
       k = Math.min(lv - SKIP, Math.max(0, Math.ceil(Math.log2((c0 * P) / (dmin * lim)) - 1e-9)));
     }
-    const m = ends[c * E + k];
-    if (!m) continue;
-    const f0 = first[c];
-    if (f0 === end) co[nd - 1] += m; else { fi[nd] = f0; co[nd++] = m; }
-    end = m === ends[c * E + lv] ? f0 + m : -1;
-    pts += m;
+    kk[c] = k; if (k > top) top = k;
+  }
+  let nd = 0, pts = 0, end = -Infinity;
+  for (let l = 0; l <= top; l++) {
+    for (let c = 0, i = l * n; c < n; c++, i++) {
+      if (kk[c] < l) continue;
+      const s = at[i], e = at[i + 1];
+      if (s === e) continue;
+      if (s - end <= GAP) { pts += e - end; co[nd - 1] = e - fi[nd - 1]; } else { fi[nd] = s; co[nd++] = e - s; pts += e - s; }
+      end = e;
+    }
   }
   r.nd = nd; r.pts = pts;
 }
@@ -450,7 +459,7 @@ function lodUpdate(cam, P) { // P: px per metre at depth 1 m
     const { n, lv } = f.draw ?? { n: f.n, lv: f.lod }; // f.draw: findDraw's (thinned: the band's)
     if (!lv) continue;
     const g = f.pts.geometry;
-    if (lv.first) { chunkRanges(lv, o, d, P, f.c.mat.size, (g.userData.rg ??= {})); g.setDrawRange(0, 0); continue; }
+    if (lv.at) { chunkRanges(lv, o, d, P, f.c.mat.size, (g.userData.rg ??= {})); g.setDrawRange(0, 0); continue; }
     const b = f.b;
     let dmin = Infinity, m = n;
     for (let c = 0; c < 8; c++) dmin = Math.min(dmin, (b[c & 1 ? 3 : 0] - o[0]) * d[0] + (b[c & 2 ? 4 : 1] - o[1]) * d[1] + (b[c & 4 ? 5 : 2] - o[2]) * d[2]);
@@ -580,7 +589,7 @@ function findDraw(f) { // what a find draws: f.draw = {n points of its index, lv
     else { idx = f.tsort.idx; n = f.tsort.cum[cumK()]; lv = null; } // no band for this width (yet): all of it, in t order
   }
   if (g.index !== idx) g.setIndex(idx);
-  f.draw = { n, lv }; g.setDrawRange(0, n); if (!lv?.first) g.userData.rg = null; // chunked: lodUpdate sets its ranges
+  f.draw = { n, lv }; g.setDrawRange(0, n); if (!lv?.at) g.userData.rg = null; // chunked: lodUpdate sets its ranges
 }
 // CHUNK, the app's damage: a class's Points draw through an index, chunk after chunk, coarse to fine in each (the class's
 // points themselves stay in Q's order: the items are runs in it, for the tap and the selection); thinned, the band's own
@@ -892,8 +901,8 @@ function pickDamage(ndc, mouse, dist) {
   };
   for (const it of app.concat(finds)) {
     if (!it.c.on || !meets(it.b, 0)) continue;
-    const L = it.xyz && it.lod?.first ? it.lod : null;
-    if (L) { for (let c = 0, E = L.lv + 1; c < L.n; c++) if (meets(L.box, c * 6)) scan(it, it.xyz, L.first[c] * 3, (L.first[c] + L.ends[c * E + L.lv]) * 3, Z, U); }
+    const L = it.xyz && it.lod?.at ? it.lod : null;
+    if (L) { for (let c = 0; c < L.n; c++) if (meets(L.box, c * 6)) for (let i = c; i < L.at.length - 1; i += L.n) scan(it, it.xyz, L.at[i] * 3, L.at[i + 1] * 3, Z, U); }
     else if (it.xyz) scan(it, it.xyz, 0, it.n * 3, Z, U);
     else scan(it, Q, it.s * 3, (it.s + it.n) * 3, B, K);
   }
