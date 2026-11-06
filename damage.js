@@ -163,11 +163,11 @@ const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // ?dmsamples= the scene target's MSAA samples (the mask's too when inline: one FBO; 4: the look before). ?dmaa=1: FXAA 3.11
 // quality (preset 12), before the mask goes over the scene; 2: FXAA 3.11 console (lighter: no edge search, no subpixel
 // blur), the default at a pixel ratio of 2 (phones, tablets: smaller pixels, more of them); 0: none. ?dmfxt= ?dmfxm=
-// ?dmfxs= its edge threshold, its minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel>: only where the depth has a
-// step or a crease (|2nd difference of ln depth| > rel, e.g. 0.02): the bridge's edges (what MSAA smooths), not its
-// texture's detail. Inline it needs ?dmsamples=0 (the depth is then a plain texture, no resolve)
+// ?dmfxs= its edge threshold, its minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel> (default 0.02; 0: everywhere):
+// only where the depth has a step or a crease (|2nd difference of ln depth| > rel): the bridge's edges (what MSAA smoothed),
+// not its texture's detail (FXAA everywhere softens it). Inline it needs ?dmsamples=0 (the depth: a plain texture, no resolve)
 const SAMPLES = knob('dmsamples', 0), AA = POST ? knob('dmaa', SAMPLES ? 0 : R.getPixelRatio() >= 2 ? 2 : 1) : 0;
-const AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0) : 0;
+const AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0.02) : 0;
 // FXAA wants the sRGB-encoded scene (?dmlin=1, below): its edge search reads bilinear taps between two rows and needs their
 // luma to be the mean of the two rows' lumas, which a linear target's taps (averaged before the encode) are not
 const LIN = knob('dmlin', AA ? 1 : 0);
