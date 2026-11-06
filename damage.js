@@ -155,7 +155,7 @@ const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 
 const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(k) ? +qs.get(k) : d);
 // inline: no separate mask target and no depth texture, so the bridge's MSAA depth needs no resolve (ANGLE's D3D11 resolves
 // depth with a shader pass: 3.6 ms at 1080p on the Intel iGPU, against 0.9 ms for the colour); the mask is packed (colour + size)
-const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), INLINE = POST && !HALF && !!knob('dminline', 1), LIN = knob('dmlin', 0);
+const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), INLINE = POST && !HALF && !!knob('dminline', 1);
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // AA: ?dmsamples= the scene target's MSAA samples (the mask's too when inline: one FBO). ?dmaa=1: FXAA 3.11 quality (preset
 // 12) on the scene in the composite, before the mask goes over it (the mask's edges have their own: the threshold's fwidth);
@@ -164,6 +164,9 @@ const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // of ln depth| > rel, e.g. 0.02): the bridge's edges (what MSAA smooths), not its texture's detail. Inline it needs
 // ?dmsamples=0 (the depth is then a plain texture, no resolve)
 const SAMPLES = knob('dmsamples', 4), AA = POST ? knob('dmaa', 0) : 0, AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0) : 0;
+// FXAA wants the sRGB-encoded scene (?dmlin=1, below): its edge search reads bilinear taps between two rows and needs their
+// luma to be the mean of the two rows' lumas, which a linear target's taps (averaged before the encode) are not
+const LIN = knob('dmlin', AA ? 1 : 0);
 const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
 const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost oštećenja) moves
@@ -232,8 +235,8 @@ vec4 bspline( float lod ) { // cubic B-spline of mip level lod: 4 bilinear taps
   return mix( mix( s3, s2, sx ), mix( s1, s0, sx ), sy );
 }
 #ifdef FXAA
-// FXAA 3.11 (Lottes) on the scene, in its own colour space (linear unless SCENE_SRGB: then the blends are linear too);
-// the luma of the sRGB-encoded colour (sqrt of the linear luma: near enough), what its thresholds are tuned for
+// FXAA 3.11 (Lottes) on the scene, in its own colour space: meant for SCENE_SRGB (sRGB-encoded, as FXAA expects; AA sets
+// it); on a linear target the luma is sqrt of the linear one, which bilinear taps do not average (the edge search errs)
 float lu( vec3 c ) {
 #ifdef SCENE_SRGB
   return dot( c, vec3( 0.299, 0.587, 0.114 ) );
