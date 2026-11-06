@@ -163,7 +163,8 @@ const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost ošt
 // a class's points (POST: opaque, into the mask; INLINE: after the bridge), and the selected damage's: the same points with
 // the same material, in a lighter colour, drawn just after its class's (the last write wins), so it is smoothed, outlined
 // and hidden behind the bridge like the rest
-const classMat = (color, voxel, opacity) => (POST ? mat(color, 1.5 * voxel, 2.5, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ)
+const SZK = knob('dmszk', 1), MINPX = knob('dmminpx', 2.5); // bench knobs: the sprites' size factor and floor (px)
+const classMat = (color, voxel, opacity) => (POST ? mat(color, 1.5 * voxel * SZK, MINPX, { depthWrite: false, ...(INLINE ? { transparent: true, blending: THREE.NoBlending } : {}) }, VZ)
   : mat(color, 1.5 * voxel, 2.5, { transparent: true, opacity, depthWrite: false }));
 const selMat = classMat(0xffffff, 0.01, OPACITY), SEL_LIGHT = Math.min(1, Math.max(0, knob('dmsel', 0.45))); // ?dmsel=: how far toward white
 function selColor(c) { // c's colour as drawn (POST: the composite shows a colour at a max channel of 1), SEL_LIGHT of the way to white
@@ -280,11 +281,17 @@ void main() {
 // at its nearest depth. Far away its sprites overlap many times anyway, and the mask shows coverage, not count.
 // Thinned cracks (below) draw a band of a crack's points; then that band is ordered coarse to fine on its own (an index),
 // with a finer limit (?dmlodpx= ?dmlodband= tune them).
-const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LOD_BAND = knob('dmlodband', 0.35), LV = 6;
-function c2f(a, ids, v, b) { // the points ids (of xyz a, box b, voxel v) coarse to fine: {order, ends[k]: points up to level k, s[k]: its cell}
+const LOD = POST && knob('dmlod', 1), LOD_PX = knob('dmlodpx', 1.25), LOD_BAND = knob('dmlodband', 0.35), LV = knob('dmlv', 6);
+// CHUNK (?dmchunk=<m>; 0: one prefix per find, as before): the points are grouped into cubes of ~CHUNK m (aligned to the
+// find's box: the LOD cells nest in them), stored chunk after chunk, each chunk coarse to fine on its own; each frame a
+// chunk is frustum-culled and draws the prefix its own nearest depth asks for. All of a Points' chunk prefixes are one
+// WEBGL_multi_draw call (drawChunks, in its onAfterRender: three draws an empty range, the multi-draw reuses its state).
+// The chunks' boxes are also the tap's index (pickDamage scans only the chunks the ray meets).
+const CHUNK = LOD ? knob('dmchunk', 0.64) : 0, SKIP = knob('dmskip', 0); // SKIP (bench): never the finest SKIP levels (with ?dmszk=, bigger sprites)
+function c2f(a, ids, v, b, lv = LV) { // the points ids (of xyz a, box b, voxel v) coarse to fine: {order, ends[k]: points up to level k, s[k]: its cell}
   const n = ids.length, done = new Uint8Array(n), picked = [], ends = [], s = [];
-  for (let k = 0; k < LV; k++) {
-    const c = v * 2 ** (LV - k), seen = new Set();
+  for (let k = 0; k < lv; k++) {
+    const c = v * 2 ** (lv - k), seen = new Set();
     const key = (j) => Math.floor((a[j] - b[0]) / c) + Math.floor((a[j + 1] - b[1]) / c) * 131072 + Math.floor((a[j + 2] - b[2]) / c) * 17179869184;
     for (const i of picked) seen.add(key(ids[i] * 3));
     for (let i = 0; i < n; i++) { // in ids' order: the first point of a cell stands for it (a band's: the one nearest the centreline)
@@ -300,27 +307,160 @@ function c2f(a, ids, v, b) { // the points ids (of xyz a, box b, voxel v) coarse
   for (let i = 0; i < n; i++) if (!done[i]) order[j++] = ids[i];
   return { order, ends, s };
 }
+// chunkLod: c2f's levels, per chunk. A point's level is the coarsest whose cell (v * 2^(lv - k), aligned to b) it is the
+// first point of, in ids' order (the same points c2f picks: the first point of a cell is also the first of the finer
+// cells inside it); a chunk's points are sorted by level (stable), so its prefix up to level k is c2f's restricted to it.
+// Typed arrays only: per chunk, a dense "first point" grid per level (reset after the chunk), the levels coarser than a
+// chunk over the chunks' first points. -> {order: ids chunk after chunk, n chunks, first[c], ends[c * (lv + 1) + k]:
+// its points up to level k, box[c * 6]: their bounds, c0: level 0's cell, lv}
+const SCR = [];
+function chunkLod(a, ids, v, b, lv = LV, chM = CHUNK) {
+  const m = ids.length, fine = 2 * v, cs = Math.max(0, Math.min(6, Math.round(Math.log2(chM / fine)))), msk = (1 << cs) - 1;
+  const F = new Int32Array(3 * m);
+  let mx = 0, my = 0, mz = 0;
+  for (let r = 0, q = 0; r < m; r++, q += 3) {
+    const j = ids[r] * 3;
+    const x = Math.max(0, Math.floor((a[j] - b[0]) / fine)), y = Math.max(0, Math.floor((a[j + 1] - b[1]) / fine)), z = Math.max(0, Math.floor((a[j + 2] - b[2]) / fine));
+    F[q] = x; F[q + 1] = y; F[q + 2] = z;
+    if (x > mx) mx = x; if (y > my) my = y; if (z > mz) mz = z;
+  }
+  // chunk ids in grid order (x fastest): neighbours along x are neighbours in the buffer, so fully drawn runs merge
+  const NX = (mx >> cs) + 1, NY = (my >> cs) + 1, NZ = (mz >> cs) + 1, ck = new Int32Array(m);
+  let nch = 0;
+  if (NX * NY * NZ <= 1 << 22) {
+    const cell = new Int32Array(NX * NY * NZ);
+    for (let r = 0, q = 0; r < m; r++, q += 3) { const k = (F[q] >> cs) + NX * ((F[q + 1] >> cs) + NY * (F[q + 2] >> cs)); ck[r] = k; cell[k] = 1; }
+    for (let k = 0; k < cell.length; k++) if (cell[k]) cell[k] = ++nch;
+    for (let r = 0; r < m; r++) ck[r] = cell[ck[r]] - 1;
+  } else { // a huge sparse grid (the app's whole class): its keys sorted
+    const key = new Float64Array(m);
+    for (let r = 0, q = 0; r < m; r++, q += 3) key[r] = (F[q] >> cs) + NX * ((F[q + 1] >> cs) + NY * (F[q + 2] >> cs));
+    const u = Float64Array.from(new Set(key)).sort(), at = new Map();
+    u.forEach((k, i) => at.set(k, i)); nch = u.length;
+    for (let r = 0; r < m; r++) ck[r] = at.get(key[r]);
+  }
+  const st = new Int32Array(nch + 1), perm = new Int32Array(m);
+  for (let r = 0; r < m; r++) st[ck[r] + 1]++;
+  for (let c = 0; c < nch; c++) st[c + 1] += st[c];
+  const pos = st.slice(0, nch);
+  for (let r = 0; r < m; r++) perm[pos[ck[r]]++] = r; // stable: ids' order within a chunk
+  const lvl = new Uint8Array(m).fill(lv), top = Math.min(cs, lv - 1), A = new Int32Array(m), B2 = new Int32Array(m), reps = [];
+  for (let j = 0; j <= top; j++) { const W = 1 << (cs - j); if (!(SCR[j]?.length >= W * W * W)) SCR[j] = new Int32Array(W * W * W).fill(-1); }
+  for (let c = 0; c < nch; c++) {
+    let cand = A, next = B2, nc = 0;
+    for (let i = st[c]; i < st[c + 1]; i++) cand[nc++] = perm[i];
+    for (let j = 0; j <= top; j++) { // shift j: cells of fine << j, level lv - 1 - j
+      const W = 1 << (cs - j), arr = SCR[j], k = lv - 1 - j;
+      let nn = 0;
+      for (let i = 0; i < nc; i++) {
+        const r = cand[i], q = 3 * r, e = ((F[q] & msk) >> j) + W * (((F[q + 1] & msk) >> j) + W * ((F[q + 2] & msk) >> j));
+        if (arr[e] < 0) { arr[e] = r; lvl[r] = k; next[nn++] = r; }
+      }
+      for (let i = 0; i < nn; i++) { const q = 3 * next[i]; arr[((F[q] & msk) >> j) + W * (((F[q + 1] & msk) >> j) + W * ((F[q + 2] & msk) >> j))] = -1; }
+      const t = cand; cand = next; next = t; nc = nn;
+    }
+    if (top === cs) reps.push(cand[0]); // the chunk's first point: the only one that can stand for a coarser cell
+  }
+  for (let j = cs + 1, rs = reps; j < lv && rs.length; j++) { // levels coarser than a chunk
+    const best = new Map(), key = (r) => (F[3 * r] >> j) + 65536 * ((F[3 * r + 1] >> j) + 65536 * (F[3 * r + 2] >> j));
+    for (const r of rs) { const k = key(r), o = best.get(k); if (o === undefined || r < o) best.set(k, r); }
+    rs = rs.filter((r) => best.get(key(r)) === r);
+    for (const r of rs) lvl[r] = lv - 1 - j;
+  }
+  const E = lv + 1, order = new Uint32Array(m), ends = new Int32Array(nch * E), box = new Float32Array(nch * 6), cnt = new Int32Array(lv + 2);
+  for (let c = 0; c < nch; c++) {
+    cnt.fill(0);
+    for (let i = st[c]; i < st[c + 1]; i++) cnt[lvl[perm[i]] + 1]++;
+    for (let k = 0; k <= lv; k++) { cnt[k + 1] += cnt[k]; ends[c * E + k] = cnt[k + 1]; }
+    let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
+    for (let i = st[c]; i < st[c + 1]; i++) {
+      const r = perm[i], id = ids[r], j = id * 3, x = a[j], y = a[j + 1], z = a[j + 2];
+      order[st[c] + cnt[lvl[r]]++] = id;
+      if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; if (z < z0) z0 = z; if (z > z1) z1 = z;
+    }
+    box.set([x0, y0, z0, x1, y1, z1], c * 6);
+  }
+  return { order, n: nch, first: st.subarray(0, nch), ends, box, c0: v * 2 ** lv, lv, band: false };
+}
 function progressive(it) { // the find's own floats, stored coarse to fine (a permutation: every point stays, picking reads them all)
-  const a = it.xyz, n = it.n, { order, ends, s } = c2f(a, Uint32Array.from({ length: n }, (_, i) => i), it.c.voxel || 0.01, it.b);
+  const a = it.xyz, n = it.n, ids = Uint32Array.from({ length: n }, (_, i) => i), t = performance.now();
+  const L = CHUNK ? chunkLod(a, ids, it.c.voxel || 0.01, it.b) : null, { order, ends, s } = L ?? c2f(a, ids, it.c.voxel || 0.01, it.b);
   const out = new Float32Array(n * 3);
   for (let i = 0, j = 0; i < n; i++, j += 3) { const k = order[i] * 3; out[j] = a[k]; out[j + 1] = a[k + 1]; out[j + 2] = a[k + 2]; }
-  it.xyz = out; it.lod = { ends, s };
+  if (L) L.order = null;
+  it.xyz = out; it.lod = L ?? { ends, s };
+  tstat.prog += performance.now() - t;
+}
+// a chunked Points' ranges for this frame (in g.userData.rg, shared with the selection's Points): the chunks in the
+// frustum (in the source frame, padded by a sprite), each its prefix for its own nearest depth; runs of whole chunks merge
+const Fr = new Float64Array(24), frs = new THREE.Frustum(), pvs = new THREE.Matrix4();
+function chunkRanges(L, o, d, P, sizeM, r) {
+  const { n, lv, ends, box, first, c0 } = L, E = lv + 1, od = o[0] * d[0] + o[1] * d[1] + o[2] * d[2];
+  if (!(r.firsts?.length >= n)) { r.firsts = new Int32Array(n); r.counts = new Int32Array(n); r.offs = new Int32Array(n); }
+  const fi = r.firsts, co = r.counts, [d0, d1, d2] = d;
+  let nd = 0, pts = 0, end = -1;
+  for (let c = 0, q = 0; c < n; c++, q += 6) {
+    const x0 = box[q], y0 = box[q + 1], z0 = box[q + 2], x1 = box[q + 3], y1 = box[q + 4], z1 = box[q + 5];
+    const dmax = (d0 > 0 ? x1 : x0) * d0 + (d1 > 0 ? y1 : y0) * d1 + (d2 > 0 ? z1 : z0) * d2 - od;
+    if (dmax <= 0) continue;
+    const pad = 0.5 * Math.max(sizeM, (MINPX * dmax) / P);
+    let p = 0;
+    for (; p < 24; p += 4) {
+      const nx = Fr[p], ny = Fr[p + 1], nz = Fr[p + 2];
+      if ((nx > 0 ? x1 : x0) * nx + (ny > 0 ? y1 : y0) * ny + (nz > 0 ? z1 : z0) * nz + Fr[p + 3] < -pad) break;
+    }
+    if (p < 24) continue; // outside a plane
+    const dmin = (d0 > 0 ? x0 : x1) * d0 + (d1 > 0 ? y0 : y1) * d1 + (d2 > 0 ? z0 : z1) * d2 - od;
+    let k = lv - SKIP;
+    if (dmin > 0) { // the coarsest level whose cell, at dmin, is under lim px (as lodUpdate's per-find prefix)
+      const lim = L.band ? LOD_BAND * Math.max(MINPX, (sizeM * P) / dmin) : LOD_PX;
+      k = Math.min(lv - SKIP, Math.max(0, Math.ceil(Math.log2((c0 * P) / (dmin * lim)) - 1e-9)));
+    }
+    const m = ends[c * E + k];
+    if (!m) continue;
+    const f0 = first[c];
+    if (f0 === end) co[nd - 1] += m; else { fi[nd] = f0; co[nd++] = m; }
+    end = m === ends[c * E + lv] ? f0 + m : -1;
+    pts += m;
+  }
+  r.nd = nd; r.pts = pts;
+}
+const MD = LOD && CHUNK && knob('dmmd', 1) ? R.getContext().getExtension('WEBGL_multi_draw') : null;
+function drawChunks(g) { // onAfterRender: three has bound g's program, VAO and index and drawn nothing (an empty range)
+  const r = g.userData.rg, gl = R.getContext();
+  if (!r?.nd || g.drawRange.count) return;
+  const idx = g.index;
+  if (idx) {
+    const bpe = idx.array.BYTES_PER_ELEMENT, type = bpe === 2 ? gl.UNSIGNED_SHORT : gl.UNSIGNED_INT, of = r.offs;
+    for (let i = 0; i < r.nd; i++) of[i] = r.firsts[i] * bpe;
+    if (MD) MD.multiDrawElementsWEBGL(gl.POINTS, r.counts, 0, type, of, 0, r.nd);
+    else for (let i = 0; i < r.nd; i++) gl.drawElements(gl.POINTS, r.counts[i], type, of[i]);
+  } else if (MD) MD.multiDrawArraysWEBGL(gl.POINTS, r.firsts, 0, r.counts, 0, r.nd);
+  else for (let i = 0; i < r.nd; i++) gl.drawArrays(gl.POINTS, r.firsts[i], r.counts[i]);
+  R.info.render.points += r.pts;
 }
 const eye = new THREE.Vector3(), fwd = new THREE.Vector3();
 function lodUpdate(cam, P) { // P: px per metre at depth 1 m
   const o = lod.w2src(eye.copy(cam.position)), d = lod.w2src(cam.getWorldDirection(fwd));
+  if (CHUNK) { // the frustum's planes in the source frame
+    frs.setFromProjectionMatrix(pvs.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse).multiply(root.matrixWorld));
+    frs.planes.forEach((p, i) => { Fr[4 * i] = p.normal.x; Fr[4 * i + 1] = p.normal.y; Fr[4 * i + 2] = p.normal.z; Fr[4 * i + 3] = p.constant; });
+  }
   for (const f of finds) {
     const { n, lv } = f.draw ?? { n: f.n, lv: f.lod }; // f.draw: findDraw's (thinned: the band's)
     if (!lv) continue;
+    const g = f.pts.geometry;
+    if (lv.first) { chunkRanges(lv, o, d, P, f.c.mat.size, (g.userData.rg ??= {})); g.setDrawRange(0, 0); continue; }
     const b = f.b;
     let dmin = Infinity, m = n;
     for (let c = 0; c < 8; c++) dmin = Math.min(dmin, (b[c & 1 ? 3 : 0] - o[0]) * d[0] + (b[c & 2 ? 4 : 1] - o[1]) * d[1] + (b[c & 4 ? 5 : 2] - o[2]) * d[2]);
     // a band is a line, one or two points wide: a cell's point may be ~2.5 cells from the next one along it, so its
     // spacing must stay well under a sprite (LOD_BAND of one; the sprites' floor or their size); an area overlaps anyway
-    const lim = lv.band ? LOD_BAND * Math.max(2.5, (f.c.mat.size * P) / dmin) : LOD_PX;
+    const lim = lv.band ? LOD_BAND * Math.max(MINPX, (f.c.mat.size * P) / dmin) : LOD_PX;
     if (dmin > 0) { const k = lv.s.findIndex((c) => (c * P) / dmin <= lim); if (k >= 0) m = lv.ends[k]; }
-    f.pts.geometry.setDrawRange(0, m);
+    g.setDrawRange(0, m);
   }
+  if (CHUNK) for (const c of C) if (c.on && c.draw?.lv) { const g = c.appPts.geometry; chunkRanges(c.draw.lv, o, d, P, c.mat.size, (g.userData.rg ??= {})); g.setDrawRange(0, 0); }
 }
 const fr = new THREE.Frustum(), pv = new THREE.Matrix4(), dbs = new THREE.Vector2(), clear = new THREE.Color();
 function inView(cam) {
@@ -335,6 +475,7 @@ function drawTops(cam) { for (const o of topsOn) { o.visible = true; R.render(o,
 const gl = R?.getContext(), DB = gl && { scene: [gl.COLOR_ATTACHMENT0, gl.NONE], mask: [gl.NONE, gl.COLOR_ATTACHMENT1] };
 function dbMask() { gl.drawBuffers(DB.mask); }
 function dbScene() { gl.drawBuffers(DB.scene); }
+function afterPts(r, s, c, g) { drawChunks(g); if (INLINE) dbScene(); } // a Points' onAfterRender: its chunks, then the scene's buffers
 if (post) lod.renderFrame = () => {
   const { scene, mask, U, quad } = post, cam = lod.camera, ca = R.getClearAlpha();
   R.getDrawingBufferSize(dbs);
@@ -388,7 +529,7 @@ function points(arr, m, box, quant) { // quant: the app's normalized uint16 in t
   g.boundingSphere = box.getBoundingSphere(new THREE.Sphere()); // no scan of 1.7 M points
   const p = new THREE.Points(g, m);
   if (quant) { p.position.fromArray(B); p.scale.fromArray(S); }
-  if (INLINE) { p.onBeforeRender = dbMask; p.onAfterRender = dbScene; } // in the scene pass: into the mask only
+  p.onAfterRender = afterPts; if (INLINE) p.onBeforeRender = dbMask; // INLINE: in the scene pass, into the mask only
   return p;
 }
 const itemPts = (it, m) => (it.xyz ? points(it.xyz, m, new THREE.Box3().setFromArray(it.b).expandByScalar(0.001), false) // b: to 1 mm
@@ -404,7 +545,7 @@ const itemPts = (it, m) => (it.xyz ? points(it.xyz, m, new THREE.Box3().setFromA
 const TUNIT = 0.25e-3, THIN = [0, 1, 2, 3, 4, 6, 8, 12, 16, 25, Infinity]; // half-widths, mm; Infinity: every point
 const thinQ = qs.get('thin'); // ?thin=<mm> | off
 let thinMm = thinQ == null ? 2 : /^(off|full|no)$/i.test(thinQ) ? Infinity : Math.max(0, +thinQ || 0);
-const thinURL = new URL('thin.js?v=1', import.meta.url), thinWait = new Map(), tstat = { n: 0, pts: 0, ms: 0, sort: 0, band: 0, t0: 0, t1: 0 };
+const thinURL = new URL('thin.js?v=1', import.meta.url), thinWait = new Map(), tstat = { n: 0, pts: 0, ms: 0, sort: 0, band: 0, t0: 0, t1: 0, prog: 0 };
 let thinWorker = null, thinMod = null, thinSeq = 0, bandT = 0;
 const cumK = () => Math.min(255, Math.floor((thinMm * 1e-3) / TUNIT + 1e-6) + 1); // cum[cumK()]: the points with t <= thinMm
 function thinOrder(t, off, n) { // counting sort by t: {idx: an index attribute, cum[k]: how many have t < k}
@@ -424,8 +565,10 @@ function thinDraw(g) { // the app's class Points and the selection: g's draw ran
   g.setDrawRange(0, d.cum[cumK()]);
 }
 function band(f) { // a find's band for thinMm, coarse to fine
-  const s = performance.now(), d = f.tsort, { order, ends, s: cell } = c2f(f.xyz, d.idx.array.subarray(0, d.cum[cumK()]), f.c.voxel || 0.005, f.b);
-  f.band = { mm: thinMm, idx: new THREE.BufferAttribute(f.n < 65536 ? Uint16Array.from(order) : order, 1), lod: { ends, s: cell, band: true } };
+  const s = performance.now(), d = f.tsort, ids = d.idx.array.subarray(0, d.cum[cumK()]), v = f.c.voxel || 0.005;
+  const L = CHUNK ? Object.assign(chunkLod(f.xyz, ids, v, f.b), { band: true }) : null, { order, ends, s: cell } = L ?? c2f(f.xyz, ids, v, f.b);
+  f.band = { mm: thinMm, idx: new THREE.BufferAttribute(f.n < 65536 ? Uint16Array.from(order) : order, 1), lod: L ?? { ends, s: cell, band: true } };
+  if (L) L.order = null;
   tstat.band += performance.now() - s;
 }
 function findDraw(f) { // what a find draws: f.draw = {n points of its index, lv: the LOD steps lodUpdate takes a prefix of}
@@ -437,17 +580,49 @@ function findDraw(f) { // what a find draws: f.draw = {n points of its index, lv
     else { idx = f.tsort.idx; n = f.tsort.cum[cumK()]; lv = null; } // no band for this width (yet): all of it, in t order
   }
   if (g.index !== idx) g.setIndex(idx);
-  f.draw = { n, lv }; g.setDrawRange(0, n);
+  f.draw = { n, lv }; g.setDrawRange(0, n); if (!lv?.first) g.userData.rg = null; // chunked: lodUpdate sets its ranges
+}
+// CHUNK, the app's damage: a class's Points draw through an index, chunk after chunk, coarse to fine in each (the class's
+// points themselves stay in Q's order: the items are runs in it, for the tap and the selection); thinned, the band's own
+// chunked index, as a find's. c.appLod = {all: L, idx, band: {mm, L, idx}}
+function appFloats(jc) { // the class's points in metres (the source frame), for chunkLod
+  const a = new Float32Array(jc.count * 3);
+  for (let i = 0, j = jc.start * 3; i < a.length; i += 3, j += 3) { a[i] = B[0] + Q[j] * K[0]; a[i + 1] = B[1] + Q[j + 1] * K[1]; a[i + 2] = B[2] + Q[j + 2] * K[2]; }
+  return a;
+}
+const idxAttr = (order, n) => new THREE.BufferAttribute(n < 65536 ? Uint16Array.from(order) : order, 1);
+function appLod(c, jc) {
+  const t = performance.now(), L = chunkLod(appFloats(jc), Uint32Array.from({ length: jc.count }, (_, i) => i), c.voxel || 0.01, B);
+  c.appLod = { jc, all: L, idx: idxAttr(L.order, jc.count) }; L.order = null;
+  tstat.prog += performance.now() - t;
+}
+function appBand(c) { // the app class's band for thinMm, chunked
+  const s = performance.now(), A = c.appLod, d = c.appPts.geometry.userData.thin, ids = d.idx.array.subarray(0, d.cum[cumK()]);
+  const L = Object.assign(chunkLod(appFloats(A.jc), ids, c.voxel || 0.005, B), { band: true });
+  A.band = { mm: thinMm, L, idx: idxAttr(L.order, A.jc.count) }; L.order = null;
+  tstat.band += performance.now() - s;
+}
+function appDraw(c) { // as findDraw, for an app class
+  const g = c.appPts?.geometry, A = c.appLod, d = g?.userData.thin;
+  if (!A) return thinDraw(g);
+  let idx = A.idx, n = idx.count, lv = A.all;
+  if (d && thinMm !== Infinity) {
+    if (A.band?.mm === thinMm) { idx = A.band.idx; n = idx.count; lv = A.band.L; } else { idx = d.idx; n = d.cum[cumK()]; lv = null; }
+  }
+  if (g.index !== idx) g.setIndex(idx);
+  c.draw = { n, lv }; g.setDrawRange(0, n); if (!lv) g.userData.rg = null;
 }
 function rebands() { // the LOD's bands for thinMm
   clearTimeout(bandT); bandT = 0;
   if (thinMm !== Infinity) for (const f of finds) if (f.tsort && f.band?.mm !== thinMm) band(f);
+  if (thinMm !== Infinity) for (const c of C) if (c.appLod && c.appPts.geometry.userData.thin && c.appLod.band?.mm !== thinMm) appBand(c);
   for (const f of finds) findDraw(f);
+  for (const c of C) if (c.appLod) appDraw(c);
   dev('thin', thinLine());
 }
 function thinAll(now) { // thinMm changed
   for (const f of finds) findDraw(f);
-  for (const c of C) thinDraw(c.appPts?.geometry);
+  for (const c of C) appDraw(c);
   thinDraw(selPts?.geometry);
   clearTimeout(bandT); bandT = 0;
   if (LOD) { if (now) rebands(); else bandT = setTimeout(rebands, 200); }
@@ -499,7 +674,9 @@ function thinApp(c, jc) { // the app's class run: its items are runs in it (no L
   for (const it of J.items) if (J.classes[it.c] === jc) runs.push(it.s - jc.start, it.n);
   thinJob({ pos: Q.slice(jc.start * 3, (jc.start + jc.count) * 3), runs, voxel: c.voxel || 0.005, base: B, scale: K }, (t) => {
     if (!t) return;
-    c.appThin = { t, start: jc.start }; c.appPts.geometry.userData.thin = thinOrder(t, 0, jc.count); thinDraw(c.appPts.geometry);
+    c.appThin = { t, start: jc.start }; c.appPts.geometry.userData.thin = thinOrder(t, 0, jc.count);
+    if (c.appLod && thinMm !== Infinity) appBand(c);
+    appDraw(c);
     if (sel?.c === c && !sel.xyz) thinSel();
   });
 }
@@ -603,6 +780,7 @@ async function loadBin() {
     if (!jc.count) continue;
     const c = klass(jc.name);
     c.g.add((c.appPts = points(new Uint16Array(buf, jc.start * 6, jc.count * 3), c.mat, unitBox(J.box), true)));
+    if (CHUNK) { appLod(c, jc); appDraw(c); }
     if (isCrack(c)) thinApp(c, jc);
   }
   J.items.forEach((it, i) => app.push({ ...it, c: klass(J.classes[it.c].name), p: it.p.map(([k, ...r]) => [J.photos[k], ...r]),
@@ -685,30 +863,45 @@ lod.el.addEventListener('pointerup', (e) => {
   if (Math.hypot(e.clientX - d.x, e.clientY - d.y) >= (mouse ? 5 : 10) || performance.now() - d.t >= 500) return;
   const ndc = lod.ndcOf(e), hit = lod.pick(ndc);
   if (!hit) return missed();
-  // the damage point nearest the tap ON SCREEN (a 3D radius at the hit shrinks to a pixel in grazing views), among the
-  // points not behind the surface: t <= the hit's depth + the 1 % the depth pull shows through, + 2 cm
+  const best = pickDamage(ndc, mouse, hit.distance);
+  if (!best) return missed();
+  select(best);
+});
+// the damage point nearest the tap ON SCREEN (a 3D radius at the hit shrinks to a pixel in grazing views), among the
+// points not behind the surface: t <= the hit's depth + the 1 % the depth pull shows through, + 2 cm. An item is scanned
+// only if the ray meets its box (padded by the tap's radius at tmax); a chunked find only in the chunks the ray meets
+function pickDamage(ndc, mouse, dist) {
   caster.setFromCamera(ndc, lod.camera);
   const o = lod.w2src(caster.ray.origin), dir = lod.w2src(caster.ray.direction);
   sray.origin.fromArray(o); sray.direction.fromArray(dir);
   const k = (2 * Math.tan((lod.camera.fov * Math.PI) / 360)) / lod.el.clientHeight; // px size / depth
-  const R = mouse ? 8 : 16, tmax = hit.distance * 1.02 + 0.02; // a fingertip is less precise than a cursor
-  let best = null, bs = R * R;
-  for (const it of app.concat(finds)) {
-    if (!it.c.on) continue;
-    ibox.setFromArray(it.b).expandByScalar(R * k * tmax);
-    if (!ibox.containsPoint(sray.origin) && !(sray.intersectBox(ibox, at) && at.distanceTo(sray.origin) <= tmax)) continue;
-    const [A, j0, b0, s0] = it.xyz ? [it.xyz, 0, Z, U] : [Q, it.s * 3, B, K]; // point j = b0 + A[j] * s0: a find's floats, the app's run
-    for (let j = j0, end = j0 + it.n * 3; j < end; j += 3) {
+  const rp = mouse ? 8 : 16, tmax = dist * 1.02 + 0.02, pad = rp * k * tmax; // a fingertip is less precise than a cursor
+  const meets = (b, q) => {
+    ibox.min.set(b[q] - pad, b[q + 1] - pad, b[q + 2] - pad); ibox.max.set(b[q + 3] + pad, b[q + 4] + pad, b[q + 5] + pad);
+    return ibox.containsPoint(sray.origin) || (sray.intersectBox(ibox, at) && at.distanceTo(sray.origin) <= tmax);
+  };
+  let best = null, bs = rp * rp;
+  const scan = (it, A, j0, end, b0, s0) => { // point j = b0 + A[j] * s0: a find's floats, the app's run
+    for (let j = j0; j < end; j += 3) {
       const x = b0[0] + A[j] * s0[0] - o[0], y = b0[1] + A[j + 1] * s0[1] - o[1], z = b0[2] + A[j + 2] * s0[2] - o[2];
       const t = x * dir[0] + y * dir[1] + z * dir[2];
       if (t <= 0 || t > tmax) continue;
       const s2 = (x * x + y * y + z * z - t * t) / (k * k * t * t); // squared screen distance, px
       if (s2 < bs) { bs = s2; best = it; }
     }
+  };
+  for (const it of app.concat(finds)) {
+    if (!it.c.on || !meets(it.b, 0)) continue;
+    const L = it.xyz && it.lod?.first ? it.lod : null;
+    if (L) { for (let c = 0, E = L.lv + 1; c < L.n; c++) if (meets(L.box, c * 6)) scan(it, it.xyz, L.first[c] * 3, (L.first[c] + L.ends[c * E + L.lv]) * 3, Z, U); }
+    else if (it.xyz) scan(it, it.xyz, 0, it.n * 3, Z, U);
+    else scan(it, Q, it.s * 3, (it.s + it.n) * 3, B, K);
   }
-  if (!best) return missed();
-  select(best);
-});
+  return best;
+}
+// for the bench's probe (bench/lod_probe.py): the LOD's parts, the finds and the tap's scan
+lod.dm = { finds: () => finds, C, chunkLod, c2f, chunkRanges, lodUpdate, pickDamage, tstat, Fr, cumK, isCrack,
+  knobs: { LOD, LOD_PX, LOD_BAND, LV, CHUNK, MINPX, MD: !!MD, thinMm: () => thinMm } };
 lod.selectDamage = (tid) => select(app.concat(finds).find((x) => x.tid === tid) ?? null); // for the bench (--eval): 'P9', 'C-4'
 
 function select(it) {
