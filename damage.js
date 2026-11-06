@@ -157,6 +157,13 @@ const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(
 // depth with a shader pass: 3.6 ms at 1080p on the Intel iGPU, against 0.9 ms for the colour); the mask is packed (colour + size)
 const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), INLINE = POST && !HALF && !!knob('dminline', 1), LIN = knob('dmlin', 0);
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
+// AA: ?dmsamples= the scene target's MSAA samples (the mask's too when inline: one FBO). ?dmaa=1: FXAA 3.11 quality (preset
+// 12) on the scene in the composite, before the mask goes over it (the mask's edges have their own: the threshold's fwidth);
+// 2: FXAA 3.11 console (lighter: no edge search, no subpixel blur). ?dmfxt= ?dmfxm= ?dmfxs= its edge threshold, its
+// minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel>: only where the depth has a step or a crease (|2nd difference
+// of ln depth| > rel, e.g. 0.02): the bridge's edges (what MSAA smooths), not its texture's detail. Inline it needs
+// ?dmsamples=0 (the depth is then a plain texture, no resolve)
+const SAMPLES = knob('dmsamples', 4), AA = POST ? knob('dmaa', 0) : 0, AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0) : 0;
 const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
 const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost oštećenja) moves
@@ -174,7 +181,7 @@ function selColor(c) { // c's colour as drawn (POST: the composite shows a colou
 }
 const post = POST && (() => {
   const depth = new THREE.DepthTexture(1, 1); depth.type = THREE.UnsignedIntType; // DEPTH_COMPONENT24, shared by both
-  const scene = new THREE.WebGLRenderTarget(1, 1, { samples: knob('dmsamples', 4), depthTexture: INLINE ? null : depth, resolveDepthBuffer: !INLINE,
+  const scene = new THREE.WebGLRenderTarget(1, 1, { samples: SAMPLES, depthTexture: INLINE && !AAD ? null : depth, resolveDepthBuffer: !INLINE,
     colorSpace: THREE.SRGBColorSpace, count: INLINE ? 2 : 1 });
   if (INLINE) Object.assign(scene.textures[1], { colorSpace: THREE.NoColorSpace, generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter });
   // ?dmlin=1: the scene target holds sRGB-encoded values in plain RGBA8, like the canvas (three writes a target's colour
@@ -224,13 +231,107 @@ vec4 bspline( float lod ) { // cubic B-spline of mip level lod: 4 bilinear taps
   float sx = s.x / ( s.x + s.y ), sy = s.z / ( s.z + s.w );
   return mix( mix( s3, s2, sx ), mix( s1, s0, sx ), sy );
 }
+#ifdef FXAA
+// FXAA 3.11 (Lottes) on the scene, in its own colour space (linear unless SCENE_SRGB: then the blends are linear too);
+// the luma of the sRGB-encoded colour (sqrt of the linear luma: near enough), what its thresholds are tuned for
+float lu( vec3 c ) {
+#ifdef SCENE_SRGB
+  return dot( c, vec3( 0.299, 0.587, 0.114 ) );
+#else
+  return sqrt( dot( c, vec3( 0.299, 0.587, 0.114 ) ) );
+#endif
+}
+vec3 tx( vec2 uv ) { return textureLod( tScene, uv, 0.0 ).rgb; }
+float lt( vec2 uv ) { return lu( tx( uv ) ); }
+#if FXAA == 1
+// quality, preset 12: 5 search steps
+#define LO( x, y ) lu( textureLodOffset( tScene, pos, 0.0, ivec2( x, y ) ).rgb )
+const float FXP[ 5 ] = float[ 5 ]( 1.0, 1.5, 2.0, 4.0, 12.0 );
+vec3 fxaa( vec2 pos, vec2 rcp, vec3 cM ) {
+  float lumaM = lu( cM ), lumaS = LO( 0, 1 ), lumaE = LO( 1, 0 ), lumaN = LO( 0, -1 ), lumaW = LO( -1, 0 );
+  float rangeMax = max( max( max( lumaS, lumaM ), lumaE ), max( lumaN, lumaW ) ), rangeMin = min( min( min( lumaS, lumaM ), lumaE ), min( lumaN, lumaW ) );
+  float range = rangeMax - rangeMin;
+  if ( range < max( FX_TM, rangeMax * FX_T ) ) return cM;
+  float lumaNW = LO( -1, -1 ), lumaSE = LO( 1, 1 ), lumaNE = LO( 1, -1 ), lumaSW = LO( -1, 1 );
+  float lumaNS = lumaN + lumaS, lumaWE = lumaW + lumaE, subpixRcpRange = 1.0 / range, subpixNSWE = lumaNS + lumaWE;
+  float edgeHorz1 = -2.0 * lumaM + lumaNS, edgeVert1 = -2.0 * lumaM + lumaWE;
+  float lumaNESE = lumaNE + lumaSE, lumaNWNE = lumaNW + lumaNE, lumaNWSW = lumaNW + lumaSW, lumaSWSE = lumaSW + lumaSE;
+  float edgeHorz2 = -2.0 * lumaE + lumaNESE, edgeVert2 = -2.0 * lumaN + lumaNWNE;
+  float edgeHorz4 = abs( edgeHorz1 ) * 2.0 + abs( edgeHorz2 ), edgeVert4 = abs( edgeVert1 ) * 2.0 + abs( edgeVert2 );
+  float edgeHorz3 = -2.0 * lumaW + lumaNWSW, edgeVert3 = -2.0 * lumaS + lumaSWSE;
+  float edgeHorz = abs( edgeHorz3 ) + edgeHorz4, edgeVert = abs( edgeVert3 ) + edgeVert4;
+  float lengthSign = rcp.x, subpixA = subpixNSWE * 2.0 + lumaNWSW + lumaNESE;
+  bool horzSpan = edgeHorz >= edgeVert;
+  if ( !horzSpan ) { lumaN = lumaW; lumaS = lumaE; } else lengthSign = rcp.y;
+  float subpixB = subpixA * ( 1.0 / 12.0 ) - lumaM, gradientN = lumaN - lumaM, gradientS = lumaS - lumaM;
+  float lumaNN = lumaN + lumaM, lumaSS = lumaS + lumaM;
+  bool pairN = abs( gradientN ) >= abs( gradientS );
+  float gradient = max( abs( gradientN ), abs( gradientS ) );
+  if ( pairN ) lengthSign = -lengthSign;
+  float subpixC = clamp( abs( subpixB ) * subpixRcpRange, 0.0, 1.0 );
+  vec2 posB = pos, offNP = horzSpan ? vec2( rcp.x, 0.0 ) : vec2( 0.0, rcp.y );
+  if ( !horzSpan ) posB.x += lengthSign * 0.5; else posB.y += lengthSign * 0.5;
+  vec2 posN = posB - offNP * FXP[ 0 ], posP = posB + offNP * FXP[ 0 ];
+  float subpixD = -2.0 * subpixC + 3.0, subpixE = subpixC * subpixC;
+  if ( !pairN ) lumaNN = lumaSS;
+  float gradientScaled = gradient * 0.25, lumaMM = lumaM - lumaNN * 0.5, subpixF = subpixD * subpixE;
+  bool lumaMLTZero = lumaMM < 0.0;
+  float lumaEndN = lt( posN ) - lumaNN * 0.5, lumaEndP = lt( posP ) - lumaNN * 0.5;
+  bool doneN = abs( lumaEndN ) >= gradientScaled, doneP = abs( lumaEndP ) >= gradientScaled;
+  if ( !doneN ) posN -= offNP * FXP[ 1 ];
+  if ( !doneP ) posP += offNP * FXP[ 1 ];
+  for ( int i = 2; i < 5; i++ ) {
+    if ( doneN && doneP ) break;
+    if ( !doneN ) lumaEndN = lt( posN ) - lumaNN * 0.5;
+    if ( !doneP ) lumaEndP = lt( posP ) - lumaNN * 0.5;
+    doneN = abs( lumaEndN ) >= gradientScaled; doneP = abs( lumaEndP ) >= gradientScaled;
+    if ( !doneN ) posN -= offNP * FXP[ i ];
+    if ( !doneP ) posP += offNP * FXP[ i ];
+  }
+  float dstN = horzSpan ? pos.x - posN.x : pos.y - posN.y, dstP = horzSpan ? posP.x - pos.x : posP.y - pos.y;
+  bool goodSpan = dstN < dstP ? ( lumaEndN < 0.0 ) != lumaMLTZero : ( lumaEndP < 0.0 ) != lumaMLTZero;
+  float pixelOffset = -min( dstN, dstP ) / ( dstP + dstN ) + 0.5;
+  float off = max( goodSpan ? pixelOffset : 0.0, subpixF * subpixF * FX_SUB );
+  if ( !horzSpan ) pos.x += off * lengthSign; else pos.y += off * lengthSign;
+  return tx( pos );
+}
+#else
+// console: 4 half-pixel taps (each a 2x2 average), then 2 or 4 along the edge; FX_SUB: the edge sharpness
+vec3 fxaa( vec2 pos, vec2 rcp, vec3 cM ) {
+  vec2 h = 0.5 * rcp;
+  float lumaNw = lt( pos - h ), lumaSw = lt( pos + vec2( -h.x, h.y ) ), lumaNe = lt( pos + vec2( h.x, -h.y ) ) + 1.0 / 384.0, lumaSe = lt( pos + h );
+  float lumaM = lu( cM ), lumaMax = max( max( lumaNw, lumaSw ), max( lumaNe, lumaSe ) ), lumaMin = min( min( lumaNw, lumaSw ), min( lumaNe, lumaSe ) );
+  if ( max( lumaMax, lumaM ) - min( lumaMin, lumaM ) < max( FX_TM, lumaMax * FX_T ) ) return cM;
+  float a = lumaSw - lumaNe, b = lumaSe - lumaNw;
+  vec2 dir1 = normalize( vec2( a + b, a - b ) ), dir2 = clamp( dir1 / max( min( abs( dir1.x ), abs( dir1.y ) ) * FX_SUB, 1e-4 ), -2.0, 2.0 );
+  vec3 A = tx( pos - dir1 * h ) + tx( pos + dir1 * h ), B = ( tx( pos - dir2 * 2.0 * rcp ) + tx( pos + dir2 * 2.0 * rcp ) ) * 0.25 + A * 0.25;
+  float lB = lu( B );
+  return lB < lumaMin || lB > lumaMax ? A * 0.5 : B;
+}
+#endif
+#endif
 void main() {
   ivec2 px = ivec2( gl_FragCoord.xy );
   vUv = gl_FragCoord.xy / vec2( textureSize( tScene, 0 ) );
-#ifdef SCENE_SRGB
   vec3 base = texelFetch( tScene, px, 0 ).rgb;
-#else
-  vec3 base = srgb( texelFetch( tScene, px, 0 ).rgb );
+#ifdef FXAA
+  {
+    vec2 rcp = 1.0 / vec2( textureSize( tScene, 0 ) ), pos = ( vec2( px ) + 0.5 ) * rcp;
+#ifdef FX_DG
+    // only at a step or a crease of the depth (2nd difference of ln depth, both axes): the bridge's edges, not its texture
+    float dM = 2.0 * textureLod( tDepth, pos, 0.0 ).r;
+    float dh = textureLodOffset( tDepth, pos, 0.0, ivec2( 1, 0 ) ).r + textureLodOffset( tDepth, pos, 0.0, ivec2( -1, 0 ) ).r - dM;
+    float dv = textureLodOffset( tDepth, pos, 0.0, ivec2( 0, 1 ) ).r + textureLodOffset( tDepth, pos, 0.0, ivec2( 0, -1 ) ).r - dM;
+    if ( max( abs( dh ), abs( dv ) ) * logFar * 0.6931 > FX_DG )
+#endif
+    base = fxaa( pos, rcp, base );
+  }
+#endif
+#ifndef SCENE_SRGB
+  base = srgb( base );
+#endif
+#ifdef MASK_ONLY
+  base = vec3( 0.5 ); // ?dmmaskonly=1: the mask over flat grey (to compare the mask alone, e.g. across ?dmsamples=)
 #endif
 #if MODE == 1
   // nothing near this 2x2 quad: the scene. One decision per quad, so fwidth() below sees all 4 pixels
@@ -266,8 +367,10 @@ void main() {
   gl_FragColor = vec4( base, 1.0 );
 #endif
 }`;
+  const fl = (x) => (+x).toFixed(5); // a GLSL float literal
   const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', ...(SIZE ? { SIZE_IN: '' } : {}), ...(LIN ? { SCENE_SRGB: '' } : {}),
-    ...(INLINE ? { PACKED: '', NO_DEPTH: '' } : {}) },
+    ...(INLINE ? { PACKED: '', NO_DEPTH: '' } : {}), ...(AA ? { FXAA: AA, FX_T: fl(knob('dmfxt', AA === 1 ? 0.166 : 0.125)),
+      FX_TM: fl(knob('dmfxm', AA === 1 ? 0.0833 : 0.05)), FX_SUB: fl(knob('dmfxs', AA === 1 ? 0.75 : 8)) } : {}), ...(AAD ? { FX_DG: fl(AAD) } : {}), ...(knob('dmmaskonly', 0) ? { MASK_ONLY: '' } : {}) },
     depthTest: false, depthWrite: false });
   const shade = sm(MODE), copy = sm(-1), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), shade), cam = new THREE.OrthographicCamera();
   quad.frustumCulled = false;
