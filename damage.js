@@ -159,7 +159,7 @@ const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), INLINE
 const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // AA: no MSAA, FXAA on the scene in the composite instead. 4x MSAA was most of the frame on a weak GPU (the Intel UHD at
 // 1080p: 6-45 ms with it, 4-18 without) and 44 of the targets' 57 bytes per pixel; FXAA costs ~1 ms there. The mask's
-// edges keep their own AA (the threshold's fwidth): MSAA changed them by little (bench/README.md, 2026-11-06).
+// edges keep their own AA (the threshold's fwidth): MSAA changed them by little (bench aa-r1..aa-f3, 2026-11-06).
 // ?dmsamples= the scene target's MSAA samples (the mask's too when inline: one FBO; 4: the look before). ?dmaa=1: FXAA 3.11
 // quality (preset 12), before the mask goes over the scene; 2: FXAA 3.11 console (lighter: no edge search, no subpixel
 // blur), the default at a pixel ratio of 2 (phones, tablets: smaller pixels, more of them); 0: none. ?dmfxt= ?dmfxm=
