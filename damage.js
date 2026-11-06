@@ -137,8 +137,9 @@ function mat(color, size, minPx, opts, defs = {}) {
 }
 
 // ---------- the look: an opaque screen-space mask, laid over the scene once (?dmpost=0: the old blended sprites) ----------
-// The scene renders into a target (no MSAA: FXAA in the composite, below). The class points draw OPAQUE (one write per sample) into a mask, depth-tested
-// against the bridge: by default (inline) a 2nd attachment of that target, drawn in the same pass after the bridge; with
+// The scene renders into a target (no MSAA by default: FXAA in the composite, below). The class points draw OPAQUE (one
+// write per sample) into a mask, depth-tested against the bridge: by default (inline) a 2nd attachment of that target,
+// drawn in the same pass after the bridge; with
 // ?dminline=0 a separate target sharing the scene's resolved depth texture. One full-screen pass then lays the mask over
 // the scene with the slider's opacity, so overlapping sprites cannot add up. Smoothing: per pixel, the mask's mip level
 // whose B-spline (4 bilinear taps) blurs by ~k sprite sizes (the sprites write their size into the mask), thresholded at t
