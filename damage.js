@@ -110,23 +110,28 @@ function patch(s) {
     .replace('#include <logdepthbuf_vertex>', '#include <logdepthbuf_vertex>\n#ifdef USE_LOGARITHMIC_DEPTH_BUFFER\n' +
       'vFragDepth = 1.0 + gl_Position.w * 0.99;\n#ifdef VERTEX_DEPTH\n' +
       'gl_Position.z = ( log2( max( vFragDepth, 1e-6 ) ) * logDepthBufFC - 1.0 ) * gl_Position.w;\n#endif\n#endif\n' +
-      '#if defined( SIZE_OUT ) || defined( MASK_INLINE )\nvSz = log2( max( gl_PointSize, 1.0 ) ) * 0.125;\n#endif\n#ifdef HALF_RES\ngl_PointSize *= 0.5;\n#endif')
-    .replace('void main() {', '#if defined( SIZE_OUT ) || defined( MASK_INLINE )\nvarying float vSz;\n#endif\nvoid main() {');
+      '#if defined( SIZE_OUT ) || defined( MASK_INLINE ) || defined( MASK_PACKED )\nvSz = log2( max( gl_PointSize, 1.0 ) ) * 0.125;\n#endif\n' +
+      '#ifdef HALF_RES\ngl_PointSize *= 0.5;\n#endif')
+    .replace('void main() {', '#if defined( SIZE_OUT ) || defined( MASK_INLINE ) || defined( MASK_PACKED )\nvarying float vSz;\n#endif\nvoid main() {');
   if ('VERTEX_DEPTH' in this.defines) s.fragmentShader = s.fragmentShader.replace('#include <logdepthbuf_fragment>', '');
   // the 2nd output (never both). SIZE_OUT: the separate mask's 2nd target gets the sprite's size, log2(px) / 8, for the
   // composite's blur. MASK_INLINE: the mask is the scene target's 2nd attachment: the class colour scaled to r + g + b = 1,
   // so the coverage is that sum, also after MSAA resolve and mips (an average keeps a sum; a max channel, where classes of
   // different colours meet, would read low), and, in alpha, the size code (times the coverage)
+  // MASK_PACKED (SPLIT): the same packing as the only output of the mask's own target
   s.fragmentShader = s.fragmentShader.replace('void main() {', '#if defined( SIZE_OUT ) || defined( MASK_INLINE )\n' +
-    'layout( location = 1 ) out highp vec4 pc_out1;\nvarying float vSz;\n#endif\nvoid main() {')
+    'layout( location = 1 ) out highp vec4 pc_out1;\n#endif\n#if defined( SIZE_OUT ) || defined( MASK_INLINE ) || defined( MASK_PACKED )\n' +
+    'varying float vSz;\n#endif\nvoid main() {')
     .replace('#include <premultiplied_alpha_fragment>', '#include <premultiplied_alpha_fragment>\n#ifdef SIZE_OUT\n' +
     'pc_out1 = vec4( vSz, 0.0, 0.0, 1.0 );\n#elif defined( MASK_INLINE )\n' +
-    'pc_out1 = vec4( diffuse / max( diffuse.r + diffuse.g + diffuse.b, 1e-3 ), vSz );\n#endif');
-  // HALF_RES: a half-size mask has no depth buffer of the bridge's size: test against its depth texture here
-  if ('HALF_RES' in this.defines) {
+    'pc_out1 = vec4( diffuse / max( diffuse.r + diffuse.g + diffuse.b, 1e-3 ), vSz );\n#elif defined( MASK_PACKED )\n' +
+    'gl_FragColor = vec4( diffuse / max( diffuse.r + diffuse.g + diffuse.b, 1e-3 ), vSz );\n#endif');
+  // BRIDGE_TEST (HALF: a half-size mask; SPLIT: an MSAA mask): no depth buffer shared with the bridge, so test against
+  // its depth texture here (BRIDGE_TEST: the bridge's pixels per mask pixel)
+  if ('BRIDGE_TEST' in this.defines) {
     s.uniforms.tBridge = post.U.tDepth;
     s.fragmentShader = s.fragmentShader.replace('void main() {', 'uniform highp sampler2D tBridge;\nvoid main() {\n' +
-      'if ( gl_FragCoord.z > texelFetch( tBridge, min( ivec2( gl_FragCoord.xy * 2.0 ), textureSize( tBridge, 0 ) - 1 ), 0 ).r ) discard;');
+      'if ( gl_FragCoord.z > texelFetch( tBridge, min( ivec2( gl_FragCoord.xy * BRIDGE_TEST ), textureSize( tBridge, 0 ) - 1 ), 0 ).r ) discard;');
   }
 }
 function mat(color, size, minPx, opts, defs = {}) {
@@ -156,8 +161,13 @@ const LOOKS = { plain: [0, 0, 0.5, 0], smooth: [1, 0.3, 0.5, 0], fill: [1, 0.5, 
 const look = LOOKS[qs.get('dmlook')] ?? LOOKS.outline, knob = (k, d) => (qs.has(k) ? +qs.get(k) : d);
 // inline: no separate mask target and no depth texture, so the bridge's MSAA depth needs no resolve (ANGLE's D3D11 resolves
 // depth with a shader pass: 3.6 ms at 1080p on the Intel iGPU, against 0.9 ms for the colour); the mask is packed (colour + size)
-const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), INLINE = POST && !HALF && !!knob('dminline', 1);
-const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
+// SPLIT (?dmsplit=1): the scene without MSAA (FXAA, below; its depth is then a plain texture, nothing to resolve) and the
+// mask in its own 4x MSAA target (?dmmasksamples=), packed like the inline one, with no depth buffer: the points test
+// the bridge's depth texture themselves (BRIDGE_TEST, per pixel). The mask keeps MSAA's sub-pixel coverage, so its edges
+// don't blink as the camera moves, and the scene drops the MSAA that was most of the frame on a weak GPU
+const MODE = knob('dmmode', look[0]), HALF = POST && !!knob('dmhalf', 0), SPLIT = POST && !HALF && !!knob('dmsplit', 1);
+const INLINE = POST && !HALF && !SPLIT && !!knob('dminline', 1);
+const SIZE = POST && MODE === 1 && !INLINE && !SPLIT && knob('dmsize', 1);
 // AA: no MSAA, FXAA on the scene in the composite instead. 4x MSAA was most of the frame on a weak GPU (the Intel UHD at
 // 1080p: 6.5-44 ms with it, 4.9-19 with this; on the RTX lost in the noise) and 44 of the targets' 57 bytes per pixel. The
 // mask's edges keep their own AA (the threshold's fwidth): MSAA changed them by little (bench aa-r1..aa-f3, 2026-11-06).
@@ -168,17 +178,20 @@ const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel> (default 0.02; 0: everywhere): only where the depth has a step
 // or a crease (|2nd difference of ln depth| > rel): the bridge's edges (what MSAA smoothed), not its texture's detail (FXAA
 // everywhere softens it). Inline it needs ?dmsamples=0 (the depth is then a plain texture, no resolve)
-// DEFAULT 4x MSAA again (2026-11-08): without it the mask's sprites cover a pixel all or nothing, so its edges blink
-// as the camera moves (bench flicker.py fl-1, mask only, a slow orbit: 800-3000 blinking px per 40 frames against
-// 4-100 with 4x; still frames, which the study compared, don't show it). ?dmsamples=0 is the FXAA look and speed.
-const SAMPLES = knob('dmsamples', 4), AA = POST ? knob('dmaa', SAMPLES ? 0 : 1) : 0;
+// The mask needs MSAA: without it its sprites cover a pixel all or nothing, so its edges blink as the camera moves (bench
+// flicker.py fl-1, mask only, a slow orbit: 800-3000 blinking px per 40 frames against 4-100 with 4x; still frames,
+// which the AA study compared, don't show it). So by default (SPLIT) the scene has none and the mask its own 4x
+// (sp-f1, 2026-11-08: the mask blinks 4-213 px, the frame 35-55 % cheaper than 4x inline on the Intel UHD; the bridge's
+// thin members shimmer ~2x more in motion: FXAA is not temporal). ?dmsplit=0 is 4x MSAA inline (the look before).
+const SAMPLES = knob('dmsamples', SPLIT ? 0 : 4), AA = POST ? knob('dmaa', SAMPLES ? 0 : 1) : 0;
 const AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0.02) : 0;
 // FXAA wants the sRGB-encoded scene (?dmlin=1, below): its edge search reads bilinear taps between two rows and needs their
 // luma to be the mean of the two rows' lumas, which a linear target's taps (averaged before the encode) are not
 const LIN = knob('dmlin', AA ? 1 : 0);
 // the blur: one B-spline at the mask's fractional mip level, its taps trilinear (0.1-0.2 ms less on the Intel UHD at 1080p,
 // <= 0.06 % of the pixels off by > 16: bench fx-final-igpu, 2026-11-06); ?dmfilt=0: two bilinear ones, mixed (before)
-const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
+const VZ = { ...(knob('dmvz', 1) || HALF || SPLIT ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}),
+  ...(HALF ? { HALF_RES: '', BRIDGE_TEST: '2.0' } : {}), ...(SPLIT ? { MASK_PACKED: '', BRIDGE_TEST: '1.0' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
 const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost oštećenja) moves
 // a class's points (POST: opaque, into the mask; INLINE: after the bridge), and the selected damage's: the same points with
@@ -202,8 +215,8 @@ const post = POST && (() => {
   // ?dmlin=1: the scene target holds sRGB-encoded values in plain RGBA8, like the canvas (three writes a target's colour
   // space only for XR targets; nothing else reads the flag), instead of SRGB8_ALPHA8 (hardware encode / decode)
   if (LIN) { scene.isXRRenderTarget = true; scene.texture.internalFormat = 'RGBA8'; }
-  const mask = INLINE ? null : new THREE.WebGLRenderTarget(1, 1, { depthTexture: HALF ? null : depth, depthBuffer: !HALF, generateMipmaps: true,
-    minFilter: THREE.LinearMipmapLinearFilter, count: SIZE ? 2 : 1 });
+  const mask = INLINE ? null : new THREE.WebGLRenderTarget(1, 1, { depthTexture: HALF || SPLIT ? null : depth, depthBuffer: !HALF && !SPLIT,
+    generateMipmaps: true, minFilter: THREE.LinearMipmapLinearFilter, count: SIZE ? 2 : 1, samples: SPLIT ? knob('dmmasksamples', 4) : 0 });
   if (SIZE) mask.textures[1].format = THREE.RedFormat;
   const mt = INLINE ? scene.textures[1] : mask.texture;
   const thr = knob('dmt', look[2]);
@@ -388,7 +401,7 @@ void main() {
 }`;
   const fl = (x) => (+x).toFixed(5); // a GLSL float literal
   const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', FILT: knob('dmfilt', 1), ...(SIZE ? { SIZE_IN: '' } : {}), ...(LIN ? { SCENE_SRGB: '' } : {}),
-    ...(INLINE ? { PACKED: '', NO_DEPTH: '' } : {}), ...(AA ? { FXAA: AA, FX_T: fl(knob('dmfxt', AA === 1 ? 0.166 : 0.125)),
+    ...(INLINE ? { PACKED: '', NO_DEPTH: '' } : SPLIT ? { PACKED: '' } : {}), ...(AA ? { FXAA: AA, FX_T: fl(knob('dmfxt', AA === 1 ? 0.166 : 0.125)),
       FX_TM: fl(knob('dmfxm', AA === 1 ? 0.0833 : 0.05)), FX_SUB: fl(knob('dmfxs', AA === 1 ? 0.75 : 8)) } : {}), ...(AAD ? { FX_DG: fl(AAD) } : {}), ...(knob('dmmaskonly', 0) ? { MASK_ONLY: '' } : {}) },
     depthTest: false, depthWrite: false });
   const shade = sm(MODE), copy = sm(-1), quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), shade), cam = new THREE.OrthographicCamera();

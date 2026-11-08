@@ -100,10 +100,12 @@ How the damage is drawn (`damage.js`): the scene renders into a target (no MSAA)
 mask that shares its depth (the bridge in front hides them), and one full-screen pass lays the mask over the scene
 with the opacity, so overlapping points never add up. That pass blurs the mask by about half a point's size (its mips,
 B-spline filtered) and thresholds it with an antialiased edge: round outlines instead of squares, small gaps filled,
-and a thin dark outline. The scene and the mask are 4x MSAA by default. `?dmsamples=0` drops MSAA for FXAA in the same
-pass, only where the depth steps or creases (the bridge's edges, not its texture): much cheaper on a weak GPU (4x MSAA
-was most of the frame there, and 44 bytes per pixel), but without MSAA the mask's sprites cover a pixel all or nothing,
-so its edges blink while the camera moves (and members thinner than a pixel, far away, break into dashes).
+and a thin dark outline. The scene has no MSAA: the same pass antialiases it with FXAA, only where the depth steps or
+creases (the bridge's edges, not its texture); 4x MSAA was most of the frame on a weak GPU. The mask keeps 4x MSAA in a
+target of its own (its points test the bridge's depth texture themselves): without it its sprites cover a pixel all or
+nothing and its edges blink while the camera moves. The bridge's thin members shimmer more in motion than with MSAA,
+and those thinner than a pixel, far away, break into dashes. `?dmsplit=0` is the look before (4x MSAA for both, the mask
+inline); `?dmsplit=0&dmsamples=0` FXAA with the mask inline and no MSAA (the fastest, but the damage's edges blink);
 `?dmaa=2` the lighter FXAA (console), `?dmaad=0` FXAA everywhere.
 The points are grouped into chunks of ~0.64 m, stored chunk after chunk and coarse to fine
 in each, so each frame a chunk out of view is skipped and one far away draws only an even subsample (its prefix for
