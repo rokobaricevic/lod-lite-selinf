@@ -103,8 +103,13 @@ B-spline filtered) and thresholds it with an antialiased edge: round outlines in
 and a thin dark outline. The same pass antialiases the scene with FXAA, only where the depth steps or creases (the
 bridge's edges, not its texture): 4x MSAA was most of the frame on a weak GPU and 44 bytes per pixel, and the mask's
 edges barely changed without it (members thinner than a pixel, far away, do break into dashes). `?dmsamples=4&dmaa=0`
-is the look before; `?dmaa=2` the lighter FXAA (console), `?dmaad=0` FXAA everywhere. A find's points are stored coarse to fine, so far away only an even subsample is drawn (a
-thinned crack's band gets its own coarse-to-fine order, rebuilt when its width changes).
+is the look before; `?dmaa=2` the lighter FXAA (console), `?dmaad=0` FXAA everywhere.
+The points are grouped into chunks of ~0.64 m, stored chunk after chunk and coarse to fine
+in each, so each frame a chunk out of view is skipped and one far away draws only an even subsample (its prefix for
+its own nearest depth); all of a Points' chunk prefixes are one WEBGL_multi_draw call. A find's own floats are stored
+that way; the app's classes (one Points each) draw through an index in that order; a thinned crack's band gets its
+own chunked order, rebuilt when its width changes. A tap scans only the chunks its ray meets. `?dmchunk=0` is the
+previous LOD (one prefix per find, none for the app's damage); `?dmlodpx= ?dmlodband= ?dmlv=` tune it.
 `?dmpost=0` is the old path (blended squares); `?dmlook=plain|smooth|fill|outline` and `?dmk= ?dmt= ?dmo=` tune it.
 
 What "Prepoznaj oštećenja" finds is saved on the PC (`selinf.py`'s FoundStore, in `out/found/`: `found.json`, one
