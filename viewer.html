@@ -241,10 +241,17 @@ function lift(e) {
 el.addEventListener('pointerup', lift);
 el.addEventListener('pointercancel', lift);
 el.addEventListener('dblclick', (e) => { if (mouse) setPivotAt(e); }); // touch, pen: the double-tap above
+// wheel: toward the point under the cursor. pick() (no BVH: 40-75 ms over the visible tiles) once per gesture, as for a
+// pinch: each step moves the camera along the ray toward that point, so its distance just scales by the step. A new
+// gesture: a pause of 300 ms or the cursor moved
+let wz = null;
 el.addEventListener('wheel', (e) => {
   e.preventDefault();
-  const ndc = ndcOf(e);
-  zoomAt(ndc, Math.exp(e.deltaY * 0.0015), pick(ndc)?.distance); // toward the point under the cursor
+  const ndc = ndcOf(e), now = performance.now(), f = Math.exp(e.deltaY * 0.0015);
+  if (!wz || now - wz.t > 300 || Math.hypot(e.clientX - wz.x, e.clientY - wz.y) > 4) wz = { x: e.clientX, y: e.clientY, hd: pick(ndc)?.distance };
+  wz.t = now;
+  zoomAt(ndc, f, wz.hd);
+  if (wz.hd != null) wz.hd *= f;
   lookAtPivot();
 }, { passive: false });
 // iOS page pinch-zoom outside the canvas (HUD, panels). Touch only: desktop Safari's trackpad pinch stays as it was
