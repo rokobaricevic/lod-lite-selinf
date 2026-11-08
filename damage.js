@@ -173,6 +173,8 @@ const AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0.02) : 0;
 // FXAA wants the sRGB-encoded scene (?dmlin=1, below): its edge search reads bilinear taps between two rows and needs their
 // luma to be the mean of the two rows' lumas, which a linear target's taps (averaged before the encode) are not
 const LIN = knob('dmlin', AA ? 1 : 0);
+// the blur: one B-spline at the mask's fractional mip level, its taps trilinear (0.1-0.2 ms less on the Intel UHD at 1080p,
+// <= 0.06 % of the pixels off by > 16: bench fx-final-igpu, 2026-11-06); ?dmfilt=0: two bilinear ones, mixed (before)
 const VZ = { ...(knob('dmvz', 1) || HALF ? { VERTEX_DEPTH: '' } : {}), ...(SIZE ? { SIZE_OUT: '' } : {}), ...(HALF ? { HALF_RES: '' } : {}),
   ...(INLINE ? { MASK_INLINE: '' } : {}) }; // the class points' defines
 const OPACITY = 0.5; // the damage's opacity until the slider (Neprozirnost oštećenja) moves
@@ -362,8 +364,12 @@ void main() {
   float pa = cov( pp );
   if ( pa > 2.0 / 255.0 ) { spx = exp2( 8.0 * szc( vUv, L + 2.0, pp ) / pa ); L = lv( spx ); }
 #endif
+#if FILT == 1
+  vec4 m = bspline( L ); // one B-spline, its taps trilinear at the fractional level (the grid: its floor's)
+#else
   float L0 = floor( L );
   vec4 m = mix( bspline( L0 ), bspline( L0 + 1.0 ), L - L0 );
+#endif
   float t = mix( thrS, thr, clamp( ( spx - minPx ) / ( outRef - minPx ), 0.0, 1.0 ) ); // thrS: around the smallest sprites
   float B = cov( m ), sd = ( B - t ) / max( fwidth( B ), 1e-4 ), inner = clamp( sd + 0.5, 0.0, 1.0 ); // sd: px to the edge
   vec3 col = srgb( hue( m ) ), o = mix( base, col, opacity * inner );
@@ -378,7 +384,7 @@ void main() {
 #endif
 }`;
   const fl = (x) => (+x).toFixed(5); // a GLSL float literal
-  const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', ...(SIZE ? { SIZE_IN: '' } : {}), ...(LIN ? { SCENE_SRGB: '' } : {}),
+  const sm = (mode) => new THREE.ShaderMaterial({ uniforms: U, vertexShader, fragmentShader, defines: { MODE: mode, LOFF: HALF ? '1.0' : '0.0', FILT: knob('dmfilt', 1), ...(SIZE ? { SIZE_IN: '' } : {}), ...(LIN ? { SCENE_SRGB: '' } : {}),
     ...(INLINE ? { PACKED: '', NO_DEPTH: '' } : {}), ...(AA ? { FXAA: AA, FX_T: fl(knob('dmfxt', AA === 1 ? 0.166 : 0.125)),
       FX_TM: fl(knob('dmfxm', AA === 1 ? 0.0833 : 0.05)), FX_SUB: fl(knob('dmfxs', AA === 1 ? 0.75 : 8)) } : {}), ...(AAD ? { FX_DG: fl(AAD) } : {}), ...(knob('dmmaskonly', 0) ? { MASK_ONLY: '' } : {}) },
     depthTest: false, depthWrite: false });
