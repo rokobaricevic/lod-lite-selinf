@@ -168,7 +168,10 @@ const SIZE = POST && MODE === 1 && !INLINE && knob('dmsize', 1);
 // minimum, its subpix (1) / edge sharpness (2). ?dmaad=<rel> (default 0.02; 0: everywhere): only where the depth has a step
 // or a crease (|2nd difference of ln depth| > rel): the bridge's edges (what MSAA smoothed), not its texture's detail (FXAA
 // everywhere softens it). Inline it needs ?dmsamples=0 (the depth is then a plain texture, no resolve)
-const SAMPLES = knob('dmsamples', 0), AA = POST ? knob('dmaa', SAMPLES ? 0 : 1) : 0;
+// DEFAULT 4x MSAA again (2026-11-08): without it the mask's sprites cover a pixel all or nothing, so its edges blink
+// as the camera moves (bench flicker.py fl-1, mask only, a slow orbit: 800-3000 blinking px per 40 frames against
+// 4-100 with 4x; still frames, which the study compared, don't show it). ?dmsamples=0 is the FXAA look and speed.
+const SAMPLES = knob('dmsamples', 4), AA = POST ? knob('dmaa', SAMPLES ? 0 : 1) : 0;
 const AAD = AA && (!INLINE || SAMPLES === 0) ? knob('dmaad', 0.02) : 0;
 // FXAA wants the sRGB-encoded scene (?dmlin=1, below): its edge search reads bilinear taps between two rows and needs their
 // luma to be the mean of the two rows' lumas, which a linear target's taps (averaged before the encode) are not
