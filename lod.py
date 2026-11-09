@@ -21,8 +21,9 @@ from scipy.spatial import cKDTree
 ROOT = Path(__file__).resolve().parent
 SOURCE, WORK, OUT = ROOT / "source", ROOT / "work", ROOT / "out"
 NODES, META = WORK / "nodes", WORK / "meta"
-TRIS = 50_000           # leaf size and simplify target: small tiles stream in small steps over a slow link
+TRIS = 50_000           # leaf size and the most a tile may hold: small tiles stream in small steps over a slow link
 MIN_TEXEL = 0.0054      # m, native atlas resolution
+LITE_M = MIN_TEXEL / 2  # m, the error of a leaf's simplified triangles, its uvs counted; the viewer draws them under 1 px
 Image.MAX_IMAGE_PIXELS = None
 
 
@@ -330,13 +331,19 @@ def kd_split(cen, ids, max_tris):
     return kd_split(cen, ids[o[:h]], max_tris) + kd_split(cen, ids[o[h:]], max_tris)
 
 
+def fit_texel(pos, faces, texel, max_px):
+    """The texel (m) the mesh's area allows in a max_px atlas at 50 % fill (xatlas's padding overshoots 70 %), at least `texel`."""
+    p = pos.astype(np.float64)
+    area = 0.5 * np.linalg.norm(np.cross(p[faces[:, 1]] - p[faces[:, 0]], p[faces[:, 2]] - p[faces[:, 0]]), axis=1).sum()
+    return max(texel, float(np.sqrt(area / (0.5 * max_px ** 2))))
+
+
 def parametrize(pos, faces, texel, max_px, sub_tris=10_000):
     """xatlas on spatial sub-meshes of <= sub_tris triangles (much faster than one big chart set) packed into
     one atlas. Returns vmapping into pos, faces (input face order), uv in px, w, h, final texel."""
     import xatlas
     p = pos.astype(np.float64)
-    area = 0.5 * np.linalg.norm(np.cross(p[faces[:, 1]] - p[faces[:, 0]], p[faces[:, 2]] - p[faces[:, 0]]), axis=1).sum()
-    texel = max(texel, float(np.sqrt(area / (0.5 * max_px ** 2))))  # 50 % fill: xatlas's padding overshoots 70 %
+    texel = fit_texel(pos, faces, texel, max_px)
     subs = []
     for g in kd_split(p[faces].mean(1), np.arange(len(faces)), sub_tris):
         used, inv = np.unique(faces[g], return_inverse=True)
@@ -371,7 +378,7 @@ def parametrize(pos, faces, texel, max_px, sub_tris=10_000):
 
 def repack(ids, G, pad=2):
     """Leaf texture = the source atlas's own texels: every UV island's pixel rect is copied at an integer offset,
-    so nothing is resampled. Returns positions, uvs (glTF, v down), faces, image."""
+    so nothing is resampled. Returns positions, uvs (glTF, v down), faces, image, each vertex's id in the source mesh."""
     from scipy.sparse import coo_matrix, csgraph
     A = G["atlas"]
     H, W = A.shape[:2]
@@ -405,7 +412,7 @@ def repack(ids, G, pad=2):
     uk, inv = np.unique(key, return_inverse=True)
     vp, vt = uk // len(tv), uk % len(tv)
     uv = (px[vt] - r0[comp[vt]] + dst[comp[vt]]) / [width, height]
-    return np.asarray(G["pos"][vp]), uv.astype(np.float32), inv.reshape(-1, 3).astype(np.uint32), img
+    return np.asarray(G["pos"][vp]), uv.astype(np.float32), inv.reshape(-1, 3).astype(np.uint32), img, vp
 
 
 def bake(pos, faces, ids, texel, max_px, G):
@@ -461,15 +468,23 @@ def grid(a, e):
     return ((q & 0xFFFFFF) | ((e & 0xFF) << 24)).astype(np.uint32), (q * 2.0 ** e).astype(np.float32)
 
 
-def write_glb(path, pos, uv, faces, ktx2):
+def write_glb(path, pos, uv, faces, ktx2, lite=None, lite_err=0.0):
     """One mesh, unlit material, KTX2 texture, EXT_meshopt_compression (v1 codec; positions on a 2^-12 m = 0.24 mm grid,
-    uvs on a 2^-16 grid; 16-bit indices below 65536 vertices).
+    uvs on a 2^-16 grid; 16-bit indices below 65536 vertices). `lite`: a simplified triangle list over the same vertices,
+    stored after the full one; the primitive's extras say where it starts (fullCount) and its error, for the viewer's draw range.
     Buffer 0 = GLB BIN chunk (compressed data + image); buffer 1 = uri-less fallback describing the raw layout."""
     import meshoptimizer as mo
     pos = np.ascontiguousarray(np.stack([pos[:, 0], pos[:, 2], -pos[:, 1]], 1), np.float32)  # Z-up -> Y-up
     idx = np.ascontiguousarray(faces, np.uint32).ravel()
     opt = np.empty_like(idx)
     mo.optimize_vertex_cache(opt, idx, vertex_count=len(pos))
+    extras = {}
+    if lite is not None:
+        li = np.ascontiguousarray(lite, np.uint32).ravel()
+        ol = np.empty_like(li)
+        mo.optimize_vertex_cache(ol, li, vertex_count=len(pos))
+        extras = {"extras": {"fullCount": len(opt), "liteErr": lite_err}}
+        opt = np.concatenate([opt, ol])
     vtx = np.ascontiguousarray(np.hstack([pos, uv]), np.float32)
     out = np.empty_like(vtx)
     n = mo.optimize_vertex_fetch(out, opt, vtx)  # also renumbers `opt` in place
@@ -500,7 +515,7 @@ def write_glb(path, pos, uv, faces, ktx2):
         "extensionsRequired": ["KHR_texture_basisu", "EXT_meshopt_compression"],
         "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
         "meshes": [{"primitives": [{"attributes": {"POSITION": 0, "TEXCOORD_0": 1}, "indices": 2,
-                                    "material": 0, "mode": 4}]}],
+                                    "material": 0, "mode": 4, **extras}]}],
         "materials": [{"pbrMetallicRoughness": {"baseColorTexture": {"index": 0}, "metallicFactor": 0.0,
                                                 "roughnessFactor": 1.0},
                        "extensions": {"KHR_materials_unlit": {}}}],
@@ -530,7 +545,7 @@ _G = {}
 
 def state():
     if not _G:
-        for k in ("pos", "uv", "fp", "ft", "atlas"):
+        for k in ("pos", "uv", "fp", "ft", "atlas", "uses"):
             _G[k] = np.load(WORK / f"{k}.npy", mmap_mode="r")
         _G["tree"] = {t["id"]: t for t in json.load(open(WORK / "tree.json"))}
     return _G
@@ -541,16 +556,48 @@ def leaf_ids(tree, tid):
     return [tid] if t["leaf"] else [l for c in t["children"] for l in leaf_ids(tree, c)]
 
 
-def do_tile(tid):
-    """Mesh (leaf: source faces; interior: merged children simplified) -> bake -> glb + work/meta/<id>.json."""
+def outside(ids, G):
+    """The vertices of the faces `ids` that some other face of the mesh uses too: the tile's seam with the rest of the mesh."""
+    if len(ids) == len(G["fp"]):
+        return np.empty(0, np.uint32)
+    u, c = np.unique(np.asarray(G["fp"][ids]), return_counts=True)
+    return u[c < G["uses"][u]]
+
+
+def simplify(pos, faces, lock, tris, err, attr=None):
+    """meshopt's simplifier: stops at `tris` triangles or at the absolute error `err` (m), whichever comes first. Only the
+    vertices flagged in `lock` are pinned; any other border (a hole in the scan) simplifies like the rest. Duplicates at the
+    same position (a UV seam) stay paired. attr: per-vertex values in metres that count in the error. Returns (indices, error)."""
+    import ctypes as C
     import meshoptimizer as mo
+    from meshoptimizer import simplifier
+    F, U, Z = C.POINTER(C.c_float), C.POINTER(C.c_uint), C.c_size_t  # the package leaves this signature undeclared: ctypes can't pass a float
+    simplifier.lib.meshopt_simplifyWithAttributes.argtypes = [U, U, Z, F, Z, Z, F, Z, F, Z, C.POINTER(C.c_ubyte), Z, C.c_float, C.c_uint, F]
+    simplifier.lib.meshopt_simplifyWithAttributes.restype = Z
+    idx = np.ascontiguousarray(faces.ravel(), np.uint32)
+    p = np.ascontiguousarray(pos, np.float32)
+    a = np.zeros((len(p), 1), np.float32) if attr is None else np.ascontiguousarray(attr, np.float32)
+    # meshopt measures positions in units of the mesh's extent: the same scale puts attributes in metres
+    w = np.full(a.shape[1], 0.0 if attr is None else 1.0 / float((p.max(0) - p.min(0)).max()), np.float32)
+    dst, e = np.empty(idx.size, np.uint32), np.zeros(1, np.float32)
+    n = mo.simplify_with_attributes(dst, idx, p, a, w, vertex_attributes_stride=a.shape[1] * 4, attribute_count=a.shape[1],
+                                    vertex_lock=np.ascontiguousarray(lock, np.uint8), target_index_count=tris * 3, target_error=err,
+                                    options=mo.SIMPLIFY_ERROR_ABSOLUTE, result_error=e)
+    return dst[:n].copy(), float(e[0])
+
+
+def do_tile(tid):
+    """Mesh (leaf: source faces; interior: merged children simplified to about a pixel's error where the tile first shows)
+    -> bake -> glb + work/meta/<id>.json."""
     t0 = time.time()
     G = state()
     t = G["tree"][tid]
     ids = np.concatenate([np.load(NODES / f"{l}_faces.npy") for l in leaf_ids(G["tree"], tid)])
+    seam = outside(ids, G)      # stays in every tile on both sides of it, whatever their levels: no cracks
+    max_px = 2048 if t["height"] >= 3 else 1024
     if t["leaf"]:
         gv, inv = np.unique(np.asarray(G["fp"][ids]), return_inverse=True)
-        pos, faces, err = np.asarray(G["pos"][gv]), inv.reshape(-1, 3).astype(np.uint32), 0.0
+        pos, faces, err, chain = np.asarray(G["pos"][gv]), inv.reshape(-1, 3).astype(np.uint32), 0.0, 0.0
         lo, hi = pos.min(0), pos.max(0)
         texel = MIN_TEXEL
     else:
@@ -563,24 +610,30 @@ def do_tile(tid):
             off += len(k["gvids"])
         faces = np.concatenate(fl).astype(np.uint32)
         pos = np.concatenate([k["positions"] for k in kids])[first]
-        dst, e = np.empty(faces.size, np.uint32), np.zeros(1, np.float32)
-        n = mo.simplify(dst, np.ascontiguousarray(faces.ravel()), np.ascontiguousarray(pos, np.float32),
-                        target_index_count=TRIS * 3, target_error=1e6,
-                        options=mo.SIMPLIFY_LOCK_BORDER | mo.SIMPLIFY_ERROR_ABSOLUTE, result_error=e)
-        used, inv = np.unique(dst[:n], return_inverse=True)
-        pos, faces, gv, err = pos[used], inv.reshape(-1, 3).astype(np.uint32), gv[used], float(e[0])
+        texel = max(MIN_TEXEL, max(m["texel_m"] for m in kmeta))  # never sharper than the coarsest child
+        # a tile first shows where its texel is one pixel: its error there stays about a pixel, its children's included
+        chain, lock = max(m["chain"] for m in kmeta), np.isin(gv, seam, assume_unique=True)
+        budget = fit_texel(pos, faces, texel, max_px)
+        dst, err = simplify(pos, faces, lock, 1, max(budget - chain, budget / 4))
+        if len(dst) > TRIS * 3:
+            dst, err = simplify(pos, faces, lock, TRIS, 1e6)
+        chain += err
+        used, inv = np.unique(dst, return_inverse=True)
+        pos, faces, gv = pos[used], inv.reshape(-1, 3).astype(np.uint32), gv[used]
         lo = np.minimum(pos.min(0), np.min([m["bbox"][0] for m in kmeta], 0))
         hi = np.maximum(pos.max(0), np.max([m["bbox"][1] for m in kmeta], 0))
-        texel = max(MIN_TEXEL, max(m["texel_m"] for m in kmeta))  # never sharper than the coarsest child
     np.savez(NODES / f"{tid}.npz", positions=pos, faces=faces, gvids=gv.astype(np.uint32))
+    lite, lite_err = None, 0.0
     if t["leaf"]:
-        res_pos, uv, idx, img = repack(ids, G)
+        res_pos, uv, idx, img, vp = repack(ids, G)
+        lite, lite_err = simplify(res_pos, idx, np.isin(vp, seam), 1, LITE_M, uv * img.shape[1::-1] * MIN_TEXEL)
     else:
-        res_pos, uv, idx, img, texel = bake(pos, faces, ids, texel, 2048 if t["height"] >= 3 else 1024, G)
+        res_pos, uv, idx, img, texel = bake(pos, faces, ids, texel, max_px, G)
     ktx2, scale = ktx2_encode(img)
-    write_glb(OUT / "tiles" / f"{tid}.tmp", res_pos, uv * scale, idx, ktx2)
+    write_glb(OUT / "tiles" / f"{tid}.tmp", res_pos, uv * scale, idx, ktx2, lite, lite_err)
     (OUT / "tiles" / f"{tid}.tmp").replace(OUT / "tiles" / f"{tid}.glb")
-    json.dump({"texel_m": texel, "err": err, "bbox": [lo.tolist(), hi.tolist()], "tris": len(idx),
+    json.dump({"texel_m": texel, "err": err, "chain": chain, "bbox": [lo.tolist(), hi.tolist()], "tris": len(idx),
+               "lite": 0 if lite is None else len(lite) // 3, "lite_err": lite_err,
                "px": list(img.shape[1::-1]), "sec": time.time() - t0}, open(META / f"{tid}.json", "w"))
     return tid
 
@@ -622,6 +675,8 @@ def build(workers):
         ingest()
     if not (WORK / "tree.json").exists():
         make_tree()
+    if not (WORK / "uses.npy").exists():    # how many faces use each vertex, for each tile's seam
+        np.save(WORK / "uses.npy", np.bincount(np.load(WORK / "fp.npy", mmap_mode="r").ravel()).astype(np.uint32))
     tiles = json.load(open(WORK / "tree.json"))
     top = max(t["height"] for t in tiles)   # the root's 50M-centroid KD tree runs alone, its children's two at a time
     sizes = {top: 1, top - 1: 2, top - 2: max(2, workers * 2 // 3)}

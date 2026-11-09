@@ -16,10 +16,13 @@ uv run lod.py serve     # http://127.0.0.1:8000/viewer.html, the tiles only (no 
 `lod.py` is the whole pipeline:
 1. Weld all parts into one mesh.
 2. k-d split into 1024 leaf tiles of ~50k original triangles.
-3. Simplify bottom-up with meshoptimizer into 256 / 64 / 16 / 4 / 1 parent tiles. Borders are locked, so tiles
-   at different levels never crack.
+3. Simplify bottom-up with meshoptimizer into 256 / 64 / 16 / 4 / 1 parent tiles, each only as far as about a pixel of
+   error where it first shows (one texel = one pixel; at most 50k triangles). Only the vertices a tile shares with the
+   rest of the mesh are locked, so tiles at different levels never crack, while the scan's own holes simplify like anything else.
 4. Textures: leaves reuse the atlas's own texels. Each UV island's pixel rect is copied at an integer offset,
-   so nothing is resampled. Parents are re-baked (xatlas + numba) from the closest point on the original mesh.
+   so nothing is resampled. Parents are re-baked (xatlas + numba) from the closest point on the original mesh. A leaf also
+   stores a simplified copy of its triangles over the same vertices and texture (2.7 mm of error, its uvs counted); the
+   viewer draws it while that is under a pixel (one draw range, nothing to load).
 5. Write 3D Tiles 1.1: KTX2 UASTC textures, meshopt geometry (positions on a 0.24 mm grid, the same in every tile),
    geometricError = max(simplify error, 16 × texel).
 
